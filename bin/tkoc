@@ -1,0 +1,1156 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly PROGRAM_NAME="tkoc"
+readonly STATE_VERSION="1"
+
+# Shared between the audit (detect) and gut (remove) commands so the two
+# never drift out of sync with each other.
+readonly -a TKOC_REMOTE_ACCESS_PACKAGES=(
+    teamviewer anydesk rustdesk tailscale zerotier-one
+    tigervnc x11vnc wayvnc tightvnc realvnc-vnc-server
+)
+readonly -a TKOC_REMOTE_ACCESS_UNITS=(
+    teamviewerd.service anydesk.service rustdesk.service
+    tailscaled.service zerotier-one.service
+    vncserver.service x11vnc.service wayvnc.service
+    sshd.service sshd.socket
+)
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+TEST_ROOT="${TKOC_TEST_ROOT:-}"
+
+if [[ -f "$PROJECT_ROOT/config/nftables.conf" ]]; then
+    SOURCE_CONFIG="$PROJECT_ROOT/config"
+else
+    SOURCE_CONFIG="${TEST_ROOT}/usr/local/lib/tkoc/config"
+fi
+
+LIVE_NFT="${TEST_ROOT}/etc/nftables.conf"
+LIVE_SYSCTL="${TEST_ROOT}/etc/sysctl.d/60-tkoc-hardening.conf"
+LIB_CONFIG="${TEST_ROOT}/usr/local/lib/tkoc/config"
+INSTALLED_BIN="${TEST_ROOT}/usr/local/bin/tkoc"
+STATE_DIR="${TEST_ROOT}/var/lib/tkoc"
+BACKUP_DIR="$STATE_DIR/backups"
+
+say() {
+    printf '%s\n' "$*"
+}
+
+die() {
+    printf '%s: %s\n' "$PROGRAM_NAME" "$*" >&2
+    exit 1
+}
+
+usage() {
+    cat <<'EOF'
+Usage: tkoc <command>
+
+Commands:
+  check                Validate the bundled or installed configuration
+  install              Detect/configure DNS, stage files, and save a backup
+  apply                Validate and activate the staged security policy
+  status               Show firewall and service health
+  audit                Audit the wider Trust No One security posture
+  doctor               Assess filesystems, storage, and hardware drivers
+  gut [--dry-run]      Remove remote access and suppress LAN discovery
+  ice [--dry-run]      Apply the optional workstation customization
+  backups              List available recovery points
+  rollback [latest|ID] Restore a recovery point and its runtime state
+  help                 Show this help
+EOF
+}
+
+valid_ipv4() {
+    local address="$1" octet
+    local -a octets
+    [[ "$address" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    IFS=. read -r -a octets <<<"$address"
+    for octet in "${octets[@]}"; do
+        [[ "$octet" =~ ^(0|[1-9][0-9]{0,2})$ ]] || return 1
+        (( 10#$octet <= 255 )) || return 1
+    done
+}
+
+detect_dns4() {
+    local address
+    if command -v resolvectl >/dev/null 2>&1; then
+        while read -r address; do
+            valid_ipv4 "$address" && [[ "$address" != 127.* ]] && {
+                printf '%s\n' "$address"
+                return 0
+            }
+        done < <(resolvectl dns 2>/dev/null | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' || true)
+    fi
+    if command -v nmcli >/dev/null 2>&1; then
+        while read -r address; do
+            valid_ipv4 "$address" && [[ "$address" != 127.* ]] && {
+                printf '%s\n' "$address"
+                return 0
+            }
+        done < <(nmcli -g IP4.DNS device show 2>/dev/null | tr ', ' '\n\n' || true)
+    fi
+    if [[ -r "${TEST_ROOT}/etc/resolv.conf" ]]; then
+        while read -r address; do
+            valid_ipv4 "$address" && [[ "$address" != 127.* ]] && {
+                printf '%s\n' "$address"
+                return 0
+            }
+        done < <(awk '$1 == "nameserver" { print $2 }' "${TEST_ROOT}/etc/resolv.conf")
+    fi
+    return 1
+}
+
+select_dns4() {
+    local address="${TKOC_DNS4:-}"
+    if [[ -n "$address" ]]; then
+        valid_ipv4 "$address" || die "TKOC_DNS4 is not a valid IPv4 address: $address"
+        say "DNS resolver supplied by TKOC_DNS4: $address" >&2
+        printf '%s\n' "$address"
+        return
+    fi
+    if address="$(detect_dns4)"; then
+        say "detected IPv4 DNS resolver: $address" >&2
+        printf '%s\n' "$address"
+        return
+    fi
+    [[ -t 0 ]] || die "could not detect an IPv4 DNS resolver; set TKOC_DNS4 and run install again"
+    read -r -p "IPv4 address of your local DNS resolver: " address
+    valid_ipv4 "$address" || die "not a valid IPv4 address: $address"
+    printf '%s\n' "$address"
+}
+
+render_nft_config() {
+    local source="$1" target="$2" dns4="$3"
+    awk -v dns4="$dns4" '
+        /^define ALLOWED_DNS4[[:space:]]*=/ {
+            print "define ALLOWED_DNS4 = { " dns4 " }"
+            replaced=1
+            next
+        }
+        { print }
+        END { if (!replaced) exit 1 }
+    ' "$source" >"$target" || die "could not configure ALLOWED_DNS4 in $source"
+}
+
+require_root() {
+    if [[ -z "$TEST_ROOT" && ${EUID:-$(id -u)} -ne 0 ]]; then
+        die "this command must run as root"
+    fi
+}
+
+require_arch() {
+    [[ -n "$TEST_ROOT" ]] && return 0
+    [[ $(uname -s) == Linux ]] || die "system operations require Linux"
+    [[ -e /etc/arch-release ]] || die "system operations require Arch Linux or an Arch derivative"
+}
+
+require_linux_runtime() {
+    [[ -n "$TEST_ROOT" ]] && return 0
+    require_arch
+    command -v nft >/dev/null 2>&1 || die "nft is required (install the Arch nftables package)"
+}
+
+validate_sysctl() {
+    local file="$1"
+    [[ -r "$file" ]] || die "missing sysctl policy: $file"
+
+    awk '
+        /^[[:space:]]*(#|$)/ { next }
+        /^[[:space:]]*[A-Za-z0-9_.]+[[:space:]]*=[[:space:]]*[^[:space:]].*$/ { next }
+        { printf "%s:%d: invalid sysctl assignment\n", FILENAME, FNR > "/dev/stderr"; bad=1 }
+        END { exit bad }
+    ' "$file" || die "sysctl policy failed structural validation"
+}
+
+validate_nft() {
+    local file="$1"
+    [[ -r "$file" ]] || die "missing nftables policy: $file"
+
+    grep -Fq 'table inet tkoc_host' "$file" || die "nftables policy does not define tkoc_host"
+    grep -Fq 'chain input' "$file" || die "nftables policy has no input chain"
+    grep -Fq 'chain forward' "$file" || die "nftables policy has no forward chain"
+    grep -Fq 'chain output' "$file" || die "nftables policy has no output chain"
+    grep -Fq 'policy drop;' "$file" || die "nftables policy has no default-drop chain"
+
+    if command -v nft >/dev/null 2>&1 && [[ -z "$TEST_ROOT" ]]; then
+        nft --check --file "$file"
+        say "nftables syntax: valid"
+    else
+        say "nftables syntax: native check skipped (nft unavailable in this environment)"
+    fi
+}
+
+validate_config() {
+    local config_dir="$1"
+    validate_nft "$config_dir/nftables.conf"
+    validate_sysctl "$config_dir/sysctl.d/60-tkoc-hardening.conf"
+    validate_ice_packages "$config_dir/ice/packages.conf"
+    say "configuration structure: valid"
+}
+
+validate_ice_packages() {
+    local file="$1" package
+    [[ -r "$file" ]] || die "missing ice package manifest: $file"
+
+    while IFS= read -r package || [[ -n "$package" ]]; do
+        package="${package%%#*}"
+        package="${package#"${package%%[![:space:]]*}"}"
+        package="${package%"${package##*[![:space:]]}"}"
+        [[ -z "$package" ]] && continue
+        [[ "$package" =~ ^[a-z0-9@._+:-]+$ ]] \
+            || die "invalid package name in $file: $package"
+    done <"$file"
+}
+
+read_ice_packages() {
+    local file="$1" package
+    while IFS= read -r package || [[ -n "$package" ]]; do
+        package="${package%%#*}"
+        package="${package#"${package%%[![:space:]]*}"}"
+        package="${package%"${package##*[![:space:]]}"}"
+        [[ -n "$package" ]] && printf '%s\n' "$package"
+    done <"$file"
+}
+
+snapshot_file() {
+    local snapshot="$1"
+    local source="$2"
+    local name="$3"
+
+    if [[ -e "$source" || -L "$source" ]]; then
+        printf 'present\n' >"$snapshot/$name.state"
+        cp -a -- "$source" "$snapshot/$name"
+    else
+        printf 'absent\n' >"$snapshot/$name.state"
+    fi
+}
+
+snapshot_runtime() {
+    local snapshot="$1"
+    local policy="$SOURCE_CONFIG/sysctl.d/60-tkoc-hardening.conf"
+    : >"$snapshot/sysctl.runtime"
+
+    if [[ -z "$TEST_ROOT" ]] && command -v sysctl >/dev/null 2>&1; then
+        while IFS= read -r key; do
+            printf '%s\t%s\n' "$key" "$(sysctl -n "$key")" >>"$snapshot/sysctl.runtime"
+        done < <(awk -F= '/^[[:space:]]*[A-Za-z0-9_.]+[[:space:]]*=/ {
+            key=$1; gsub(/[[:space:]]/, "", key); print key
+        }' "$policy")
+    fi
+
+    if [[ -z "$TEST_ROOT" ]] && command -v systemctl >/dev/null 2>&1; then
+        systemctl is-enabled nftables.service >"$snapshot/nftables.enabled" 2>/dev/null || true
+        systemctl is-active nftables.service >"$snapshot/nftables.active" 2>/dev/null || true
+    fi
+}
+
+create_snapshot() {
+    local id snapshot
+    id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    snapshot="$BACKUP_DIR/$id"
+    mkdir -p -- "$snapshot"
+    printf '%s\n' "$STATE_VERSION" >"$snapshot/version"
+    snapshot_file "$snapshot" "$LIVE_NFT" nftables.conf
+    snapshot_file "$snapshot" "$LIVE_SYSCTL" 60-tkoc-hardening.conf
+    snapshot_file "$snapshot" "$LIB_CONFIG" lib-config
+    snapshot_file "$snapshot" "$INSTALLED_BIN" tkoc
+    snapshot_runtime "$snapshot"
+    ln -sfn -- "$id" "$BACKUP_DIR/latest"
+    printf '%s\n' "$snapshot"
+}
+
+restore_file() {
+    local snapshot="$1"
+    local target="$2"
+    local name="$3"
+    local state
+    state="$(<"$snapshot/$name.state")"
+
+    if [[ "$state" == present ]]; then
+        mkdir -p -- "$(dirname -- "$target")"
+        rm -rf -- "$target"
+        cp -a -- "$snapshot/$name" "$target"
+    elif [[ "$state" == absent ]]; then
+        rm -rf -- "$target"
+    else
+        die "invalid backup state for $name"
+    fi
+}
+
+restore_runtime() {
+    local snapshot="$1" key value
+
+    if [[ -z "$TEST_ROOT" && -s "$snapshot/sysctl.runtime" ]]; then
+        while IFS=$'\t' read -r key value; do
+            sysctl -q -w "$key=$value"
+        done <"$snapshot/sysctl.runtime"
+    fi
+
+    [[ -n "$TEST_ROOT" ]] && return 0
+
+    if [[ -e "$LIVE_NFT" ]]; then
+        nft --check --file "$LIVE_NFT"
+        nft --file "$LIVE_NFT"
+    elif nft list table inet tkoc_host >/dev/null 2>&1; then
+        nft delete table inet tkoc_host
+    fi
+
+    if command -v systemctl >/dev/null 2>&1; then
+        case "$(cat "$snapshot/nftables.enabled" 2>/dev/null || true)" in
+            enabled) systemctl enable nftables.service >/dev/null ;;
+            disabled) systemctl disable nftables.service >/dev/null ;;
+        esac
+        case "$(cat "$snapshot/nftables.active" 2>/dev/null || true)" in
+            active) systemctl start nftables.service ;;
+            inactive|failed) systemctl stop nftables.service ;;
+        esac
+    fi
+}
+
+cmd_check() {
+    validate_config "$SOURCE_CONFIG"
+}
+
+cmd_install() {
+    local snapshot dns4 rendered_nft
+    require_root
+    require_linux_runtime
+    validate_config "$SOURCE_CONFIG"
+
+    reset_audit_counts
+    say "Pre-install system assessment"
+    run_system_health_assessment
+    say "pre-install summary: $AUDIT_PASS pass, $AUDIT_WARN warning, $AUDIT_FAIL fail"
+    if (( AUDIT_FAIL > 0 )); then
+        say "pre-install findings need attention; installation will continue without attempting repairs"
+    fi
+    say ""
+
+    dns4="$(select_dns4)"
+    rendered_nft="$(mktemp "${TMPDIR:-/tmp}/tkoc-nftables.XXXXXX")"
+    trap "rm -f -- '$rendered_nft'" EXIT
+    render_nft_config "$SOURCE_CONFIG/nftables.conf" "$rendered_nft" "$dns4"
+    validate_nft "$rendered_nft"
+    snapshot="$(create_snapshot)"
+
+    mkdir -p -- "$(dirname -- "$LIVE_NFT")" "$(dirname -- "$LIVE_SYSCTL")"
+    mkdir -p -- "$LIB_CONFIG/sysctl.d" "$LIB_CONFIG/ice" \
+        "$(dirname -- "$INSTALLED_BIN")"
+
+    install -m 0644 -- "$rendered_nft" "$LIVE_NFT"
+    install -m 0644 -- "$SOURCE_CONFIG/sysctl.d/60-tkoc-hardening.conf" "$LIVE_SYSCTL"
+    install -m 0644 -- "$rendered_nft" "$LIB_CONFIG/nftables.conf"
+    install -m 0644 -- "$SOURCE_CONFIG/sysctl.d/60-tkoc-hardening.conf" \
+        "$LIB_CONFIG/sysctl.d/60-tkoc-hardening.conf"
+    install -m 0644 -- "$SOURCE_CONFIG/ice/packages.conf" \
+        "$LIB_CONFIG/ice/packages.conf"
+    install -m 0755 -- "$SCRIPT_DIR/tkoc" "$INSTALLED_BIN"
+    rm -f -- "$rendered_nft"
+    trap - EXIT
+
+    say "staged security baseline"
+    say "allowed IPv4 DNS resolver: $dns4"
+    say "backup: $snapshot"
+    say "review $LIVE_NFT, then run: sudo tkoc apply"
+}
+
+cmd_apply() {
+    require_root
+    require_linux_runtime
+    validate_nft "$LIVE_NFT"
+    validate_sysctl "$LIVE_SYSCTL"
+
+    if [[ -n "$TEST_ROOT" ]]; then
+        say "test root: apply skipped"
+        return 0
+    fi
+
+    sysctl --load "$LIVE_SYSCTL"
+    nft --file "$LIVE_NFT"
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl enable --now nftables.service >/dev/null
+    fi
+    say "security baseline applied"
+}
+
+cmd_status() {
+    require_root
+    require_linux_runtime
+    if [[ -n "$TEST_ROOT" ]]; then
+        [[ -f "$LIVE_NFT" && -f "$LIVE_SYSCTL" ]] || die "staged policy is incomplete"
+        say "staged policy: present"
+        return 0
+    fi
+
+    nft list table inet tkoc_host
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl is-enabled nftables.service
+        systemctl is-active nftables.service
+    fi
+}
+
+AUDIT_PASS=0
+AUDIT_WARN=0
+AUDIT_FAIL=0
+
+audit_pass() {
+    AUDIT_PASS=$((AUDIT_PASS + 1))
+    printf 'PASS  %s\n' "$*"
+}
+
+audit_warn() {
+    AUDIT_WARN=$((AUDIT_WARN + 1))
+    printf 'WARN  %s\n' "$*"
+}
+
+audit_fail() {
+    AUDIT_FAIL=$((AUDIT_FAIL + 1))
+    printf 'FAIL  %s\n' "$*"
+}
+
+audit_info() {
+    printf 'INFO  %s\n' "$*"
+}
+
+audit_platform_identity() {
+    local os_name="unknown Linux" os_file="${TEST_ROOT}/etc/os-release"
+    say "Platform assessment"
+    if [[ -n "$TEST_ROOT" ]]; then
+        audit_info "platform detection skipped inside the isolated test root"
+        return
+    fi
+    if [[ -r "$os_file" ]]; then
+        os_name="$(sed -n 's/^PRETTY_NAME=//p' "$os_file" | sed -n '1p')"
+        os_name="${os_name#\"}"
+        os_name="${os_name%\"}"
+    fi
+    if [[ -e "${TEST_ROOT}/etc/arch-release" ]]; then
+        audit_pass "Arch-family operating system detected: $os_name"
+    else
+        audit_warn "this does not appear to be an Arch-family system: $os_name"
+    fi
+    audit_info "running kernel: $(uname -r)"
+}
+
+reset_audit_counts() {
+    AUDIT_PASS=0
+    AUDIT_WARN=0
+    AUDIT_FAIL=0
+}
+
+show_excerpt() {
+    local text="$1" limit="${2:-8}"
+    [[ -n "$text" ]] || return 0
+    printf '%s\n' "$text" | sed -n "1,${limit}s/^/      /p"
+}
+
+audit_filesystem_health() {
+    local source fstype target verification findings count ext4_dir ext4_errors ext4_name
+    local -a filesystem_findings=()
+
+    say "Filesystem assessment"
+    if [[ -n "$TEST_ROOT" ]]; then
+        audit_warn "filesystem assessment unavailable inside the isolated test root"
+        return
+    fi
+
+    if command -v findmnt >/dev/null 2>&1; then
+        while read -r source fstype target; do
+            case "$fstype" in
+                ext2|ext3|ext4|btrfs|xfs|f2fs|vfat|exfat|ntfs|ntfs3)
+                    audit_info "$source on $target uses $fstype"
+                    ;;
+            esac
+        done < <(findmnt -rn -o SOURCE,FSTYPE,TARGET)
+
+        if verification="$(findmnt --verify --verbose 2>&1)"; then
+            audit_pass "fstab sources, targets, types, and options passed findmnt verification"
+        else
+            audit_warn "fstab verification reported a problem"
+            show_excerpt "$verification"
+        fi
+    else
+        audit_warn "findmnt is unavailable; install util-linux to inventory filesystems"
+    fi
+
+    for ext4_dir in /sys/fs/ext4/*; do
+        [[ -r "$ext4_dir/errors_count" ]] || continue
+        ext4_name="${ext4_dir##*/}"
+        ext4_errors="$(<"$ext4_dir/errors_count")"
+        if [[ "$ext4_errors" =~ ^[0-9]+$ ]] && (( ext4_errors == 0 )); then
+            audit_pass "mounted ext4 device $ext4_name reports zero kernel errors"
+        else
+            audit_fail "mounted ext4 device $ext4_name reports ${ext4_errors:-unknown} kernel error(s)"
+        fi
+    done
+
+    if ! command -v journalctl >/dev/null 2>&1; then
+        audit_warn "journalctl is unavailable; filesystem errors could not be searched"
+        return
+    fi
+
+    mapfile -t filesystem_findings < <(
+        journalctl --no-pager --all --since '30 days ago' 2>/dev/null \
+            | grep -Ei \
+                'Dirty bit is set|not properly unmounted|journal.*(corrupt|uncleanly shut down)|Buffer I/O error|blk_update_request|critical medium error|EXT[234]-fs.*(error|warning)|BTRFS.*(error|corrupt)|XFS.*(error|corrupt)|F2FS-fs.*error|exFAT-fs.*(error|corrupt)|NTFS.*(error|corrupt)|Remounting filesystem read-only' \
+            | awk '!seen[$0]++' || true
+    )
+    count="${#filesystem_findings[@]}"
+    if (( count == 0 )); then
+        audit_pass "no filesystem corruption or block-I/O warnings found in the last 30 days"
+    else
+        audit_warn "$count filesystem or unclean-shutdown warning(s) found in the last 30 days"
+        findings="$(printf '%s\n' "${filesystem_findings[@]}")"
+        show_excerpt "$findings" 10
+        (( count <= 10 )) || audit_info "$((count - 10)) additional warning(s) omitted"
+        audit_info "do not run a repairing fsck against a mounted filesystem"
+    fi
+}
+
+audit_storage_health() {
+    local disk output status
+    local -a disks=()
+
+    say "Storage-device assessment"
+    if [[ -n "$TEST_ROOT" ]]; then
+        audit_warn "storage-device assessment unavailable inside the isolated test root"
+        return
+    fi
+    if ! command -v lsblk >/dev/null 2>&1; then
+        audit_warn "lsblk is unavailable; block devices could not be inventoried"
+        return
+    fi
+
+    mapfile -t disks < <(lsblk -dn -o NAME,TYPE | awk '$2 == "disk" { print "/dev/" $1 }')
+    if (( ${#disks[@]} == 0 )); then
+        audit_warn "no physical block devices were found"
+        return
+    fi
+
+    while read -r disk; do
+        [[ -n "$disk" ]] && audit_info "$disk"
+    done < <(lsblk -dn -o NAME,TRAN,SIZE,MODEL \
+        | awk '{ name=$1; $1=""; sub(/^[[:space:]]+/, ""); print "/dev/" name " " $0 }')
+
+    if ! command -v smartctl >/dev/null 2>&1; then
+        audit_warn "SMART health was not checked; install smartmontools"
+        command -v nvme >/dev/null 2>&1 \
+            || audit_info "install nvme-cli for additional NVMe diagnostics"
+        return
+    fi
+
+    for disk in "${disks[@]}"; do
+        status=0
+        output="$(smartctl -H -A -n standby "$disk" 2>&1)" || status=$?
+        if grep -Eiq 'device is in (STANDBY|SLEEP) mode' <<<"$output"; then
+            audit_info "$disk is asleep; SMART query did not wake it"
+        elif grep -Eiq 'overall-health.*(FAILED|FAILING)|SMART Health Status:[[:space:]]*(FAILED|BAD)|Critical Warning:[[:space:]]+0x0*[1-9a-f]' <<<"$output"; then
+            audit_fail "$disk reports failing SMART/NVMe health"
+            show_excerpt "$(printf '%s\n' "$output" | grep -Ei 'overall-health|SMART Health Status|Critical Warning|Media and Data Integrity Errors|Error Information Log Entries' || true)"
+        elif grep -Eiq 'overall-health.*PASSED|SMART Health Status:[[:space:]]*OK|Critical Warning:[[:space:]]+0x0+$' <<<"$output"; then
+            audit_pass "$disk reports healthy SMART/NVMe status"
+            if printf '%s\n' "$output" | awk '
+                /Current_Pending_Sector|Offline_Uncorrectable/ && ($NF + 0) > 0 { bad=1 }
+                /Media and Data Integrity Errors:/ {
+                    value=$NF; gsub(/,/, "", value); if ((value + 0) > 0) bad=1
+                }
+                END { exit !bad }
+            '; then
+                audit_warn "$disk has non-zero pending, uncorrectable, or media-error counters"
+            fi
+        elif grep -Eiq 'Permission denied|Operation not permitted' <<<"$output"; then
+            audit_warn "$disk SMART data is inaccessible; run tkoc doctor as root"
+        elif (( status != 0 )); then
+            audit_warn "$disk did not provide a conclusive SMART health result"
+            show_excerpt "$output" 4
+        else
+            audit_warn "$disk supports smartctl but returned no recognizable health verdict"
+        fi
+    done
+}
+
+audit_pci_driver_bindings() {
+    local description driver modules count=0
+
+    say "Kernel-driver assessment"
+    if [[ -n "$TEST_ROOT" ]]; then
+        audit_warn "driver assessment unavailable inside the isolated test root"
+        return
+    fi
+    if ! command -v lspci >/dev/null 2>&1; then
+        audit_warn "PCI drivers were not checked; install pciutils"
+        return
+    fi
+
+    while IFS='|' read -r description driver modules; do
+        case "$description" in
+            *"VGA compatible controller"*|*"3D controller"*|*"Display controller"*|\
+            *"Ethernet controller"*|*"Network controller"*|\
+            *"Non-Volatile memory controller"*|*"SATA controller"*|\
+            *"RAID bus controller"*|*"Mass storage controller"*|\
+            *"Audio device"*|*"USB controller"*) ;;
+            *) continue ;;
+        esac
+        count=$((count + 1))
+        if [[ "$driver" == vfio-pci ]]; then
+            audit_warn "vfio-pci owns $description (expected only for intentional device passthrough)"
+        elif [[ -n "$driver" ]]; then
+            audit_pass "$driver is bound to $description"
+        elif [[ -n "$modules" ]]; then
+            audit_warn "no active driver is bound to $description; candidate module(s): $modules"
+        else
+            audit_fail "no kernel driver or candidate module was found for $description"
+        fi
+    done < <(lspci -Dnnk | awk '
+        function emit() {
+            if (description != "") print description "|" driver "|" modules
+        }
+        /^[[:xdigit:]]{4}:/ {
+            emit(); description=$0; driver=""; modules=""; next
+        }
+        /^[[:space:]]+Kernel driver in use:/ {
+            driver=$0; sub(/^[^:]+:[[:space:]]*/, "", driver); next
+        }
+        /^[[:space:]]+Kernel modules:/ {
+            modules=$0; sub(/^[^:]+:[[:space:]]*/, "", modules); next
+        }
+        END { emit() }
+    ')
+    (( count > 0 )) \
+        || audit_warn "lspci found no display, network, storage, audio, or USB controllers"
+}
+
+audit_graphics_driver_stack() {
+    local gpu_info module_path module_package module_version user_version signer taints findings
+    local nvidia_output nvidia_status=0
+    local known_gpu=0
+    local -a graphics_findings=()
+
+    [[ -z "$TEST_ROOT" ]] || return 0
+    command -v lspci >/dev/null 2>&1 || return 0
+    gpu_info="$(lspci -nn | grep -Ei 'VGA compatible controller|3D controller|Display controller' || true)"
+    [[ -n "$gpu_info" ]] || return 0
+
+    if grep -Fqi NVIDIA <<<"$gpu_info"; then
+        known_gpu=1
+        audit_info "NVIDIA GPU detected: $(printf '%s\n' "$gpu_info" | grep -Fi NVIDIA | sed -n '1p')"
+        if ! modinfo nvidia >/dev/null 2>&1; then
+            audit_fail "NVIDIA hardware is present but the nvidia kernel module is unavailable"
+            audit_info "current Turing-or-newer Arch systems normally use nvidia-open or nvidia-open-dkms with nvidia-utils"
+        else
+            module_path="$(modinfo -n nvidia 2>/dev/null || true)"
+            module_package="$(pacman -Qqo "$module_path" 2>/dev/null || true)"
+            module_version="$(modinfo -F version nvidia 2>/dev/null || true)"
+            [[ -n "$module_package" ]] \
+                && audit_pass "the NVIDIA module for $(uname -r) is owned by $module_package" \
+                || audit_warn "pacman does not own the NVIDIA module used by $(uname -r): $module_path"
+
+            if command -v nvidia-smi >/dev/null 2>&1; then
+                nvidia_output="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>&1)" \
+                    || nvidia_status=$?
+                user_version="$(printf '%s\n' "$nvidia_output" | sed -n '1p' | tr -d '[:space:]')"
+                if (( nvidia_status != 0 )) || [[ -z "$user_version" ]]; then
+                    audit_fail "nvidia-smi cannot communicate with the NVIDIA driver"
+                    show_excerpt "$nvidia_output" 3
+                elif [[ "$user_version" == "$module_version" ]]; then
+                    audit_pass "NVIDIA kernel and userspace versions match: $module_version"
+                else
+                    audit_fail "NVIDIA version mismatch: kernel=$module_version userspace=${user_version:-unavailable}"
+                fi
+            else
+                audit_warn "nvidia-smi is unavailable; install the matching nvidia-utils package"
+            fi
+
+            signer="$(modinfo -F signer nvidia 2>/dev/null || true)"
+            [[ -n "$signer" ]] \
+                && audit_pass "the NVIDIA kernel module is signed by $signer" \
+                || audit_warn "the NVIDIA kernel module is unsigned"
+            taints="$(cat /sys/module/nvidia/taint 2>/dev/null || true)"
+            [[ -z "$taints" ]] \
+                || audit_warn "the loaded NVIDIA module carries kernel taint flag(s): $taints"
+        fi
+
+        if command -v journalctl >/dev/null 2>&1; then
+            mapfile -t graphics_findings < <(
+                journalctl --no-pager --all --since '30 days ago' _TRANSPORT=kernel 2>/dev/null \
+                    | grep -Ei 'NVRM:.*Xid|nvidia.*failed|WARNING:.*drm_modeset|nv_drm.*failed|GPU has fallen off the bus' \
+                    | grep -Eiv 'module verification failed' \
+                    | awk '!seen[$0]++' || true
+            )
+            if (( ${#graphics_findings[@]} == 0 )); then
+                audit_pass "no NVIDIA Xid, DRM warning, or GPU-failure messages found in the last 30 days"
+            else
+                audit_warn "${#graphics_findings[@]} NVIDIA/DRM warning(s) found in the last 30 days"
+                findings="$(printf '%s\n' "${graphics_findings[@]}")"
+                show_excerpt "$findings" 8
+            fi
+        fi
+    fi
+
+    if grep -Eqi '(^|[^[:alnum:]_])(AMD|ATI)([^[:alnum:]_]|$)' <<<"$gpu_info"; then
+        known_gpu=1
+        pacman -Qq mesa >/dev/null 2>&1 \
+            && audit_pass "Mesa is installed for the AMD graphics stack" \
+            || audit_warn "install mesa for AMD OpenGL support"
+        pacman -Qq vulkan-radeon >/dev/null 2>&1 \
+            && audit_pass "vulkan-radeon is installed" \
+            || audit_warn "install vulkan-radeon if Vulkan support is needed"
+    fi
+
+    if grep -Fqi Intel <<<"$gpu_info"; then
+        known_gpu=1
+        pacman -Qq mesa >/dev/null 2>&1 \
+            && audit_pass "Mesa is installed for the Intel graphics stack" \
+            || audit_warn "install mesa for Intel OpenGL support"
+        pacman -Qq vulkan-intel >/dev/null 2>&1 \
+            && audit_pass "vulkan-intel is installed" \
+            || audit_warn "install vulkan-intel if Vulkan support is needed"
+    fi
+
+    if (( known_gpu == 0 )); then
+        audit_warn "graphics hardware was found but its userspace driver recommendation is unknown"
+        show_excerpt "$gpu_info" 4
+    fi
+
+    pacman -Qq linux-firmware >/dev/null 2>&1 \
+        && audit_pass "linux-firmware is installed" \
+        || audit_warn "install linux-firmware for common hardware firmware"
+}
+
+audit_driver_load_errors() {
+    local findings
+    local -a driver_findings=()
+
+    [[ -z "$TEST_ROOT" ]] || return 0
+    if ! command -v journalctl >/dev/null 2>&1; then
+        audit_warn "journalctl is unavailable; driver and firmware load errors were not searched"
+        return
+    fi
+
+    mapfile -t driver_findings < <(
+        journalctl --no-pager --all --since '30 days ago' _TRANSPORT=kernel 2>/dev/null \
+            | grep -Ei 'Direct firmware load for .* failed|firmware: failed to load|failed to load firmware|no suitable firmware|Unknown symbol|probe with driver .* failed' \
+            | awk '!seen[$0]++' || true
+    )
+    if (( ${#driver_findings[@]} == 0 )); then
+        audit_pass "no kernel driver or firmware-load failures found in the last 30 days"
+    else
+        audit_warn "${#driver_findings[@]} driver or firmware-load failure(s) found in the last 30 days"
+        findings="$(printf '%s\n' "${driver_findings[@]}")"
+        show_excerpt "$findings" 8
+    fi
+}
+
+audit_manjaro_driver_profiles() {
+    local output profiles
+
+    [[ -z "$TEST_ROOT" ]] || return 0
+    command -v mhwd >/dev/null 2>&1 || return 0
+    output="$(mhwd -li -d --pci 2>/dev/null || true)"
+    profiles="$(printf '%s\n' "$output" \
+        | awk -F: '/^[[:space:]]*NAME:/ {
+            name=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", name); print name
+        }' | awk '!seen[$0]++')"
+    if [[ -n "$profiles" ]]; then
+        while read -r profile; do
+            [[ -n "$profile" ]] && audit_pass "Manjaro hardware profile is installed: $profile"
+        done <<<"$profiles"
+    else
+        audit_info "mhwd reports no installed PCI driver profile; most in-kernel drivers do not require one"
+    fi
+}
+
+run_system_health_assessment() {
+    audit_platform_identity
+    say ""
+    audit_filesystem_health
+    say ""
+    audit_storage_health
+    say ""
+    audit_pci_driver_bindings
+    audit_graphics_driver_stack
+    audit_driver_load_errors
+    audit_manjaro_driver_profiles
+}
+
+cmd_doctor() {
+    require_root
+    require_arch
+    reset_audit_counts
+    say "System health and driver assessment (read-only)"
+    say ""
+    run_system_health_assessment
+    say ""
+    say "summary: $AUDIT_PASS pass, $AUDIT_WARN warning, $AUDIT_FAIL fail"
+    say "no filesystems were repaired, SMART tests started, or drivers installed"
+    (( AUDIT_FAIL == 0 ))
+}
+
+audit_secure_boot() {
+    local variable value
+    variable="$(find /sys/firmware/efi/efivars -maxdepth 1 \
+        -name 'SecureBoot-*' -print -quit 2>/dev/null || true)"
+    if [[ -z "$variable" ]]; then
+        audit_warn "Secure Boot state is unavailable (legacy boot or unsupported firmware)"
+        return
+    fi
+
+    value="$(od -An -t u1 "$variable" 2>/dev/null \
+        | awk '{ for (i = 1; i <= NF; i++) value=$i } END { print value }')"
+    if [[ "$value" == 1 ]]; then
+        audit_pass "Secure Boot is enabled"
+    else
+        audit_warn "Secure Boot is not enabled"
+    fi
+}
+
+audit_root_encryption() {
+    local root_source
+    root_source="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    if [[ -n "$root_source" ]] \
+        && lsblk -s -n -o TYPE "$root_source" 2>/dev/null | grep -Fxq crypt; then
+        audit_pass "the root filesystem is backed by a LUKS/dm-crypt device"
+    else
+        audit_warn "encrypted root could not be verified"
+    fi
+}
+
+audit_kernel_lockdown() {
+    local state
+    if [[ ! -r /sys/kernel/security/lockdown ]]; then
+        audit_warn "kernel lockdown state is unavailable"
+        return
+    fi
+    state="$(< /sys/kernel/security/lockdown)"
+    if [[ "$state" == *'[integrity]'* || "$state" == *'[confidentiality]'* ]]; then
+        audit_pass "kernel lockdown is enforced: $state"
+    else
+        audit_warn "kernel lockdown is not enforced: $state"
+    fi
+}
+
+audit_mac() {
+    local modules=""
+    [[ -r /sys/kernel/security/lsm ]] && modules="$(< /sys/kernel/security/lsm)"
+    if [[ ",$modules," == *,apparmor,* ]]; then
+        if command -v aa-enabled >/dev/null 2>&1 && aa-enabled >/dev/null 2>&1; then
+            audit_pass "AppArmor is active"
+        else
+            audit_warn "AppArmor LSM is present but userspace enforcement was not verified"
+        fi
+    elif [[ ",$modules," == *,selinux,* ]]; then
+        if command -v getenforce >/dev/null 2>&1 && [[ $(getenforce) == Enforcing ]]; then
+            audit_pass "SELinux is enforcing"
+        else
+            audit_warn "SELinux LSM is present but not verified in enforcing mode"
+        fi
+    else
+        audit_warn "no AppArmor or SELinux mandatory-access-control LSM is active"
+    fi
+}
+
+audit_sysctl_policy() {
+    local key expected actual mismatches=0 checked=0
+    while IFS=$'\t' read -r key expected; do
+        checked=$((checked + 1))
+        actual="$(sysctl -n "$key" 2>/dev/null || true)"
+        if [[ "$actual" != "$expected" ]]; then
+            mismatches=$((mismatches + 1))
+            printf '      %s expected=%s actual=%s\n' "$key" "$expected" "${actual:-unavailable}"
+        fi
+    done < <(awk -F= '/^[[:space:]]*[A-Za-z0-9_.]+[[:space:]]*=/ {
+        key=$1; value=$2
+        gsub(/[[:space:]]/, "", key)
+        sub(/^[[:space:]]+/, "", value); sub(/[[:space:]]+$/, "", value)
+        printf "%s\t%s\n", key, value
+    }' "$LIVE_SYSCTL")
+
+    if (( mismatches == 0 )); then
+        audit_pass "all $checked managed sysctl values match policy"
+    else
+        audit_fail "$mismatches of $checked managed sysctl values differ from policy"
+    fi
+}
+
+audit_cpu_mitigations() {
+    local report
+    if [[ ! -d /sys/devices/system/cpu/vulnerabilities ]]; then
+        audit_warn "CPU vulnerability reports are unavailable"
+        return
+    fi
+    report="$(grep -H -E 'Vulnerable|SMT vulnerable' \
+        /sys/devices/system/cpu/vulnerabilities/* 2>/dev/null || true)"
+    if [[ -n "$report" ]]; then
+        audit_warn "one or more CPU vulnerability reports require review"
+        printf '%s\n' "$report" | sed 's/^/      /'
+    else
+        audit_pass "kernel reports no unmitigated CPU vulnerability state"
+    fi
+}
+
+audit_listeners() {
+    local count
+    if ! command -v ss >/dev/null 2>&1; then
+        audit_warn "ss is unavailable; listening sockets were not inspected"
+        return
+    fi
+    count="$(ss -H -lntu 2>/dev/null | wc -l)"
+    count="${count//[[:space:]]/}"
+    if [[ "$count" == 0 ]]; then
+        audit_pass "no TCP or UDP listening sockets were found"
+    else
+        audit_warn "$count TCP/UDP listening sockets require owner review (run: ss -lntup)"
+    fi
+}
+
+audit_remote_access() {
+    local package unit found=0
+
+    if command -v pacman >/dev/null 2>&1; then
+        for package in "${TKOC_REMOTE_ACCESS_PACKAGES[@]}"; do
+            if pacman -Q -- "$package" >/dev/null 2>&1; then
+                audit_warn "remote-access package is installed: $package"
+                found=1
+            fi
+        done
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        for unit in "${TKOC_REMOTE_ACCESS_UNITS[@]}"; do
+            if systemctl is-active --quiet "$unit" 2>/dev/null \
+                || systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+                audit_warn "remote-access unit is enabled or active: $unit"
+                found=1
+            fi
+        done
+        if systemctl list-unit-files sshd-unix-local.socket --no-legend 2>/dev/null \
+            | grep -q '^sshd-unix-local\.socket'; then
+            audit_pass "sshd-unix-local.socket is local AF_UNIX activation, not a TCP/22 listener"
+        fi
+    fi
+    (( found != 0 )) || audit_pass "no known remote-access packages or active services were detected"
+}
+
+cmd_audit() {
+    require_root
+    require_linux_runtime
+    reset_audit_counts
+    [[ -r "$LIVE_SYSCTL" ]] || die "managed sysctl policy is not installed"
+
+    say "Trust No One posture audit"
+    say ""
+
+    if nft list table inet tkoc_host >/dev/null 2>&1; then
+        audit_pass "tkoc_host firewall table is loaded"
+    else
+        audit_fail "tkoc_host firewall table is not loaded"
+    fi
+
+    if command -v systemctl >/dev/null 2>&1 \
+        && systemctl is-enabled --quiet nftables.service \
+        && systemctl is-active --quiet nftables.service; then
+        audit_pass "nftables.service is enabled and active"
+    else
+        audit_fail "nftables.service is not both enabled and active"
+    fi
+
+    audit_sysctl_policy
+    audit_secure_boot
+    audit_root_encryption
+
+    if [[ -e /sys/class/tpm/tpm0 ]]; then
+        audit_pass "TPM device is available"
+    else
+        audit_warn "no TPM device was detected"
+    fi
+
+    if command -v bootctl >/dev/null 2>&1 \
+        && LC_ALL=C bootctl status 2>/dev/null | grep -Eq 'Measured UKI:[[:space:]]+yes'; then
+        audit_pass "a measured unified kernel image was reported"
+    else
+        audit_warn "a measured unified kernel image was not verified"
+    fi
+
+    if [[ $(uname -r) == *-hardened* ]]; then
+        audit_pass "linux-hardened is running"
+    else
+        audit_warn "the running kernel is not linux-hardened"
+    fi
+
+    audit_kernel_lockdown
+
+    if [[ -r /sys/module/module/parameters/sig_enforce ]] \
+        && grep -Eq '^(Y|1)$' /sys/module/module/parameters/sig_enforce; then
+        audit_pass "kernel module signature enforcement is active"
+    else
+        audit_warn "kernel module signature enforcement was not verified"
+    fi
+
+    audit_mac
+
+    if command -v systemctl >/dev/null 2>&1 \
+        && systemctl is-enabled --quiet auditd.service \
+        && systemctl is-active --quiet auditd.service; then
+        audit_pass "auditd is enabled and active"
+    else
+        audit_warn "auditd is not both enabled and active"
+    fi
+
+    if [[ -r /proc/cmdline ]] && grep -qw 'audit=1' /proc/cmdline; then
+        audit_pass "early-boot kernel auditing is enabled"
+    else
+        audit_warn "kernel command line does not contain audit=1"
+    fi
+
+    if command -v clamscan >/dev/null 2>&1; then
+        audit_pass "ClamAV tooling is installed"
+    else
+        audit_warn "no malware scanner was detected"
+    fi
+
+    if command -v dmsetup >/dev/null 2>&1 \
+        && dmsetup status --target verity 2>/dev/null | grep -q .; then
+        audit_pass "an active dm-verity integrity target was detected"
+    else
+        audit_warn "dm-verity root integrity was not detected"
+    fi
+
+    audit_cpu_mitigations
+    audit_listeners
+    audit_remote_access
+    audit_warn "DoH inside HTTPS is not distinguishable without a controlled proxy or destination policy"
+
+    say ""
+    run_system_health_assessment
+
+    say ""
+    say "summary: $AUDIT_PASS pass, $AUDIT_WARN warning, $AUDIT_FAIL fail"
+    (( AUDIT_FAIL == 0 ))
+}
+
+cmd_gut() {
+    local mode="${1:-}" package unit
+    local -a installed=()
+
+    [[ -z "$mode" || "$mode" == --dry-run ]] || die "gut accepts only --dry-run"
+    if command -v pacman >/dev/null 2>&1; then
+        for package in "${TKOC_REMOTE_ACCESS_PACKAGES[@]}"; do
+            pacman -Q -- "$package" >/dev/null 2>&1 && installed+=("$package")
+        done
+    fi
+
+    say "LAN discovery is blocked by the tkoc firewall policy."
+    say "DHCP is preserved because removing UDP 68->67 would break dynamic addressing."
+    say "sshd-unix-local.socket is preserved because it is local AF_UNIX IPC, not TCP/22."
+    if (( ${#installed[@]} == 0 )); then
+        say "no known remote-access packages are installed"
+    else
+        say "remote-access packages: ${installed[*]}"
+    fi
+
+    if [[ "$mode" == --dry-run ]]; then
+        say "dry run: no services were disabled and no packages were removed"
+        return 0
+    fi
+
+    require_root
+    require_arch
+    command -v pacman >/dev/null 2>&1 || die "pacman is required"
+
+    if command -v systemctl >/dev/null 2>&1; then
+        for unit in "${TKOC_REMOTE_ACCESS_UNITS[@]}"; do
+            systemctl disable --now "$unit" >/dev/null 2>&1 || true
+        done
+    fi
+    if (( ${#installed[@]} > 0 )); then
+        pacman -Rns -- "${installed[@]}"
+    fi
+    say "remote-access services disabled and installed remote-access packages removed"
+    say "run 'tkoc apply' to activate the LAN discovery blocks"
+}
+
+cmd_ice() {
+    local mode="${1:-}" manifest="$SOURCE_CONFIG/ice/packages.conf" package
+    local -a packages=() missing=()
+
+    [[ -z "$mode" || "$mode" == --dry-run ]] \
+        || die "ice accepts only --dry-run"
+    validate_ice_packages "$manifest"
+    mapfile -t packages < <(read_ice_packages "$manifest" | awk '!seen[$0]++')
+    (( ${#packages[@]} > 0 )) || die "ice package manifest is empty"
+
+    if [[ "$mode" == --dry-run ]]; then
+        say "ice customization packages:"
+        printf '  %s\n' "${packages[@]}"
+        say "dry run: no packages were installed"
+        return 0
+    fi
+
+    require_root
+    require_arch
+    command -v pacman >/dev/null 2>&1 || die "pacman is required"
+
+    for package in "${packages[@]}"; do
+        pacman -Q -- "$package" >/dev/null 2>&1 || missing+=("$package")
+    done
+    if (( ${#missing[@]} == 0 )); then
+        say "ice customization is already installed"
+        return 0
+    fi
+
+    say "installing ice customization packages: ${missing[*]}"
+    pacman -S --needed -- "${missing[@]}"
+    say "ice customization applied"
+}
+
+cmd_backups() {
+    require_root
+    if [[ ! -d "$BACKUP_DIR" ]]; then
+        say "no backups"
+        return 0
+    fi
+    find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -print \
+        | sed 's#.*/##' \
+        | LC_ALL=C sort -r
+}
+
+cmd_rollback() {
+    local requested="${1:-latest}" snapshot
+    require_root
+    require_linux_runtime
+    [[ "$requested" != */* && "$requested" != .* ]] || die "invalid backup ID"
+    snapshot="$BACKUP_DIR/$requested"
+    [[ -d "$snapshot" ]] || die "backup not found: $requested"
+    [[ "$(<"$snapshot/version")" == "$STATE_VERSION" ]] || die "unsupported backup version"
+
+    restore_file "$snapshot" "$LIVE_NFT" nftables.conf
+    restore_file "$snapshot" "$LIVE_SYSCTL" 60-tkoc-hardening.conf
+    restore_file "$snapshot" "$LIB_CONFIG" lib-config
+    restore_file "$snapshot" "$INSTALLED_BIN" tkoc
+    restore_runtime "$snapshot"
+    say "restored backup: $(basename -- "$(cd -- "$snapshot" && pwd -P)")"
+}
+
+main() {
+    local command="${1:-help}"
+    shift || true
+    case "$command" in
+        check) [[ $# -eq 0 ]] || die "check takes no arguments"; cmd_check ;;
+        install) [[ $# -eq 0 ]] || die "install takes no arguments"; cmd_install ;;
+        apply) [[ $# -eq 0 ]] || die "apply takes no arguments"; cmd_apply ;;
+        status) [[ $# -eq 0 ]] || die "status takes no arguments"; cmd_status ;;
+        audit) [[ $# -eq 0 ]] || die "audit takes no arguments"; cmd_audit ;;
+        doctor) [[ $# -eq 0 ]] || die "doctor takes no arguments"; cmd_doctor ;;
+        gut) [[ $# -le 1 ]] || die "gut accepts at most one argument"; cmd_gut "$@" ;;
+        ice) [[ $# -le 1 ]] || die "ice accepts at most one argument"; cmd_ice "$@" ;;
+        backups) [[ $# -eq 0 ]] || die "backups takes no arguments"; cmd_backups ;;
+        rollback) [[ $# -le 1 ]] || die "rollback accepts at most one backup ID"; cmd_rollback "$@" ;;
+        help|-h|--help) usage ;;
+        *) die "unknown command: $command" ;;
+    esac
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    main "$@"
+fi
