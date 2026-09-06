@@ -17,6 +17,25 @@ readonly -a TKOC_REMOTE_ACCESS_UNITS=(
     sshd.service sshd.socket
 )
 
+# Recognized keys in config/theme/kde.conf and config/theme/presets/*.conf,
+# shared between validation and the key-to-apply-function dispatch so the
+# two cannot drift apart.
+readonly -a TKOC_THEME_KEYS=(
+    LOOK_AND_FEEL COLOR_SCHEME ICON_THEME CURSOR_THEME
+    FONT_GENERAL FONT_FIXED_WIDTH
+)
+
+# Recognized keys in config/dotfiles/prompt-themes/*.conf.
+readonly -a TKOC_PROMPT_THEME_KEYS=(
+    ACCENT1 ACCENT2 ACCENT3 ACCENT4 USER_ICON HOST_ICON DIR_ICON GIT_ICON
+)
+
+# All commands tkoc understands, used to validate "tkoc <command> --help".
+readonly -a TKOC_COMMANDS=(
+    check install apply status audit doctor gut ice dotfiles theme
+    backups rollback
+)
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 TEST_ROOT="${TKOC_TEST_ROOT:-}"
@@ -34,6 +53,18 @@ INSTALLED_BIN="${TEST_ROOT}/usr/local/bin/tkoc"
 STATE_DIR="${TEST_ROOT}/var/lib/tkoc"
 BACKUP_DIR="$STATE_DIR/backups"
 
+# The dotfiles and theme commands are user-scoped, not root-scoped: they
+# operate on the invoking user's own home directory and are never staged
+# under TEST_ROOT the way the system paths above are. Tests sandbox them by
+# exporting HOME/XDG_CONFIG_HOME/XDG_STATE_HOME instead.
+USER_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+USER_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+USER_DOTFILES_DIR="$USER_CONFIG_HOME/tkoc/dotfiles"
+USER_BACKUP_DIR="$USER_STATE_HOME/tkoc/backups"
+USER_BASHRC="$HOME/.bashrc"
+USER_BACKUP_SNAPSHOT=""
+USER_PROMPT_THEME_FILE="$USER_STATE_HOME/tkoc/prompt-theme"
+
 say() {
     printf '%s\n' "$*"
 }
@@ -43,23 +74,215 @@ die() {
     exit 1
 }
 
+install_staged_file() {
+    local mode="$1" source="$2" target="$3"
+    if [[ -e "$target" && "$source" -ef "$target" ]]; then
+        return 0
+    fi
+    install -m "$mode" -- "$source" "$target"
+}
+
 usage() {
     cat <<'EOF'
-Usage: tkoc <command>
+Usage: tkoc <command> [options]
+       tkoc <command> --help    Show detailed help for one command
 
-Commands:
+Security baseline (root):
   check                Validate the bundled or installed configuration
   install              Detect/configure DNS, stage files, and save a backup
   apply                Validate and activate the staged security policy
   status               Show firewall and service health
   audit                Audit the wider Trust No One security posture
   doctor               Assess filesystems, storage, and hardware drivers
-  gut [--dry-run]      Remove remote access and suppress LAN discovery
-  ice [--dry-run]      Apply the optional workstation customization
-  backups              List available recovery points
-  rollback [latest|ID] Restore a recovery point and its runtime state
-  help                 Show this help
+  gut [--dry-run]       Remove remote access and suppress LAN discovery
+
+Optional customization (root, opt-in):
+  ice [--dry-run]       Install the optional workstation package list
+
+Personal provisioning (your user, never root, opt-in):
+  dotfiles [--dry-run]        Link managed shell snippets into your home directory
+  dotfiles list-themes        List available prompt (bash PS1) themes
+  dotfiles set-theme <name>   Switch your prompt theme
+  theme [--dry-run]           Apply config/theme/kde.conf (your custom profile)
+  theme list                  List named KDE Plasma theme presets
+  theme set <name>            Apply a named KDE Plasma theme preset
+
+Recovery:
+  backups               List available recovery points
+  rollback [latest|ID]  Restore a recovery point and its runtime state
+
+  help                  Show this help
 EOF
+}
+
+command_known() {
+    local name="$1" candidate
+    for candidate in "${TKOC_COMMANDS[@]}"; do
+        [[ "$candidate" == "$name" ]] && return 0
+    done
+    return 1
+}
+
+show_command_help() {
+    local command="$1"
+    case "$command" in
+        check) cat <<'EOF'
+Usage: tkoc check
+
+Validates the bundled configuration (or, once installed, the staged
+configuration under /usr/local/lib/tkoc/config): the nftables policy, the
+sysctl hardening file, the ice package manifest, the dotfiles environment
+file/shell snippets/prompt themes, and the theme config/presets. Runs
+unprivileged and changes nothing.
+EOF
+        ;;
+        install) cat <<'EOF'
+Usage: sudo tkoc install
+
+Detects (or asks for, via TKOC_DNS4) the local IPv4 DNS resolver, runs a
+read-only pre-install system/hardware health assessment, takes a timestamped
+backup of whatever it is about to replace, and stages the firewall policy,
+sysctl hardening file, and ice/dotfiles/theme config under
+/usr/local/lib/tkoc/config and /usr/local/bin/tkoc.
+
+Nothing is activated by install. Review /etc/nftables.conf, then run:
+  sudo tkoc apply
+
+Example:
+  sudo TKOC_DNS4=172.16.2.40 tkoc install
+EOF
+        ;;
+        apply) cat <<'EOF'
+Usage: sudo tkoc apply
+
+Validates and activates the security policy staged by the most recent
+install: loads the sysctl hardening file, loads the nftables firewall table,
+and enables+starts nftables.service.
+EOF
+        ;;
+        status) cat <<'EOF'
+Usage: sudo tkoc status
+
+Shows the active tkoc_host firewall table and verifies that nftables.service
+is enabled and either active or a successfully completed one-shot loader.
+Read-only.
+EOF
+        ;;
+        audit) cat <<'EOF'
+Usage: sudo tkoc audit
+
+Runs the full Trust No One posture audit: firewall/sysctl policy match,
+Secure Boot, disk encryption, TPM, measured boot, kernel lockdown/signature
+enforcement, mandatory access control, auditd, CPU mitigations, listening
+sockets, known remote-access tooling, and the same system/hardware health
+assessment used by install and doctor. Prints PASS/WARN/FAIL/INFO lines and
+a final summary; exits non-zero if anything FAILed. Read-only.
+EOF
+        ;;
+        doctor) cat <<'EOF'
+Usage: sudo tkoc doctor
+
+Runs only the read-only system/hardware health assessment (filesystems,
+storage/SMART health, PCI driver bindings, GPU driver stack, driver/firmware
+load errors, Manjaro hardware profiles) without the rest of the security
+posture audit. Never repairs a filesystem, starts a SMART self-test,
+installs a package, or changes a driver.
+EOF
+        ;;
+        gut) cat <<'EOF'
+Usage: sudo tkoc gut [--dry-run]
+
+Disables and removes known remote-access tooling (TeamViewer, AnyDesk,
+RustDesk, Tailscale, ZeroTier, common VNC servers, network sshd) and relies
+on the firewall to suppress common LAN discovery broadcasts. Preserves DHCP
+and sshd-unix-local.socket (local AF_UNIX IPC, not a TCP/22 listener).
+
+--dry-run reports what is currently installed/enabled without changing
+anything. After a real run, activate the LAN-discovery blocks with:
+  sudo tkoc apply
+EOF
+        ;;
+        ice) cat <<'EOF'
+Usage: sudo tkoc ice [--dry-run]
+
+Installs the optional package list in config/ice/packages.conf via pacman,
+skipping packages that are already installed. Never runs as part of check,
+install, apply, or audit. install only stages the manifest for later use.
+
+--dry-run lists the configured packages without installing anything.
+EOF
+        ;;
+        dotfiles) cat <<'EOF'
+Usage: tkoc dotfiles [--dry-run]
+       tkoc dotfiles list-themes
+       tkoc dotfiles set-theme <name> [--dry-run]
+
+Runs as your normal user; refuses to run as root/under sudo. Symlinks the
+managed shell-snippet directory, environment-variable file, and prompt-theme
+library from config/dotfiles/ into $XDG_CONFIG_HOME/tkoc/dotfiles/, and
+appends a small guarded block to ~/.bashrc that sources the snippets.
+Re-running is a no-op once everything is linked; anything it would replace
+is backed up first under $XDG_STATE_HOME/tkoc/backups/.
+
+If it finds your original hand-written prompt-theme system still in
+~/.bashrc, it offers to migrate it: an explicit [Y/n] prompt decides whether
+to back it up before removing it (set TKOC_DOTFILES_BACKUP=yes|no to answer
+non-interactively). Your current theme selection is preserved automatically.
+
+list-themes lists the named prompt themes available (see config/dotfiles/
+prompt-themes/); set-theme switches which one your prompt uses.
+
+Examples:
+  tkoc dotfiles --dry-run
+  tkoc dotfiles
+  tkoc dotfiles list-themes
+  tkoc dotfiles set-theme nord
+EOF
+        ;;
+        theme) cat <<'EOF'
+Usage: tkoc theme [--dry-run]
+       tkoc theme list
+       tkoc theme set <name> [--dry-run]
+
+Runs as your normal user; refuses to run as root/under sudo. Applies KDE
+Plasma color scheme, icon theme, cursor theme, global theme ("look and
+feel"), and fonts using plasma-apply-lookandfeel, plasma-apply-colorscheme,
+plasma-apply-cursortheme, and kwriteconfig6. A setting whose tool isn't
+installed is skipped, not treated as an error. Font changes need a logout/
+login (or plasmashell restart) to take effect everywhere; everything else
+applies immediately to the running session.
+
+Plain `tkoc theme` applies your own custom profile at config/theme/kde.conf.
+`tkoc theme list`/`tkoc theme set <name>` use the named presets shipped
+under config/theme/presets/ instead.
+
+Examples:
+  tkoc theme --dry-run
+  tkoc theme
+  tkoc theme list
+  tkoc theme set nord
+EOF
+        ;;
+        backups) cat <<'EOF'
+Usage: sudo tkoc backups
+
+Lists the timestamped recovery points under /var/lib/tkoc/backups, newest
+first. These are system-level (root) backups taken by install/gut/ice; they
+are unrelated to the user-scoped backups dotfiles takes under
+$XDG_STATE_HOME/tkoc/backups.
+EOF
+        ;;
+        rollback) cat <<'EOF'
+Usage: sudo tkoc rollback [latest|ID]
+
+Restores a system-level recovery point: the firewall policy, sysctl file,
+staged lib config, the installed tkoc binary, and runtime state (sysctl
+values, the live nftables table, and nftables.service). Defaults to the
+most recent backup if no ID is given (see: tkoc backups).
+EOF
+        ;;
+        *) die "unknown command: $command" ;;
+    esac
 }
 
 valid_ipv4() {
@@ -140,6 +363,12 @@ require_root() {
     fi
 }
 
+require_not_root() {
+    if [[ -z "$TEST_ROOT" && ${EUID:-$(id -u)} -eq 0 ]]; then
+        die "this command must not run as root (it operates on your home directory)"
+    fi
+}
+
 require_arch() {
     [[ -n "$TEST_ROOT" ]] && return 0
     [[ $(uname -s) == Linux ]] || die "system operations require Linux"
@@ -187,6 +416,9 @@ validate_config() {
     validate_nft "$config_dir/nftables.conf"
     validate_sysctl "$config_dir/sysctl.d/60-tkoc-hardening.conf"
     validate_ice_packages "$config_dir/ice/packages.conf"
+    validate_dotfiles_config "$config_dir"
+    validate_theme_config "$config_dir/theme/kde.conf"
+    validate_theme_presets "$config_dir/theme/presets"
     say "configuration structure: valid"
 }
 
@@ -212,6 +444,92 @@ read_ice_packages() {
         package="${package%"${package##*[![:space:]]}"}"
         [[ -n "$package" ]] && printf '%s\n' "$package"
     done <"$file"
+}
+
+validate_dotfiles_environment() {
+    local file="$1"
+    [[ -r "$file" ]] || die "missing dotfiles environment file: $file"
+
+    awk '
+        /^[[:space:]]*(#|$)/ { next }
+        /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*[^[:space:]].*$/ { next }
+        { printf "%s:%d: invalid environment assignment\n", FILENAME, FNR > "/dev/stderr"; bad=1 }
+        END { exit bad }
+    ' "$file" || die "dotfiles environment file failed structural validation"
+}
+
+validate_dotfiles_shell_snippets() {
+    local dir="$1" snippet found=0
+    [[ -d "$dir" ]] || die "missing dotfiles shell snippet directory: $dir"
+
+    for snippet in "$dir"/*.sh; do
+        [[ -e "$snippet" ]] || continue
+        found=1
+        bash -n "$snippet" || die "shell snippet failed syntax validation: $snippet"
+    done
+    (( found )) || die "dotfiles shell snippet directory is empty: $dir"
+}
+
+validate_prompt_theme_config() {
+    local file="$1" key
+    [[ -r "$file" ]] || die "missing prompt theme: $file"
+
+    while IFS='=' read -r key _ || [[ -n "$key" ]]; do
+        key="${key%%[[:space:]]*}"
+        [[ -z "$key" || "$key" == \#* ]] && continue
+        printf '%s\n' "${TKOC_PROMPT_THEME_KEYS[@]}" | grep -Fxq -- "$key" \
+            || die "unrecognized prompt theme key in $file: $key"
+    done <"$file"
+}
+
+validate_prompt_themes() {
+    local dir="$1" preset found=0
+    [[ -d "$dir" ]] || die "missing prompt theme directory: $dir"
+    for preset in "$dir"/*.conf; do
+        [[ -e "$preset" ]] || continue
+        found=1
+        validate_prompt_theme_config "$preset"
+    done
+    (( found )) || die "no prompt themes found in $dir"
+}
+
+validate_dotfiles_config() {
+    local config_dir="$1"
+    validate_dotfiles_environment "$config_dir/dotfiles/environment.conf"
+    validate_dotfiles_shell_snippets "$config_dir/dotfiles/shell.d"
+    validate_prompt_themes "$config_dir/dotfiles/prompt-themes"
+    [[ -r "$config_dir/dotfiles/bashrc.block" ]] \
+        || die "missing dotfiles bashrc block: $config_dir/dotfiles/bashrc.block"
+}
+
+validate_theme_config() {
+    local file="$1" key
+    [[ -r "$file" ]] || die "missing theme configuration: $file"
+
+    awk '
+        /^[[:space:]]*(#|$)/ { next }
+        /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*[^[:space:]].*$/ { next }
+        { printf "%s:%d: invalid theme assignment\n", FILENAME, FNR > "/dev/stderr"; bad=1 }
+        END { exit bad }
+    ' "$file" || die "theme configuration failed structural validation"
+
+    while IFS='=' read -r key _ || [[ -n "$key" ]]; do
+        key="${key%%[[:space:]]*}"
+        [[ -z "$key" || "$key" == \#* ]] && continue
+        printf '%s\n' "${TKOC_THEME_KEYS[@]}" | grep -Fxq -- "$key" \
+            || die "unrecognized theme key in $file: $key"
+    done <"$file"
+}
+
+validate_theme_presets() {
+    local dir="$1" preset found=0
+    [[ -d "$dir" ]] || die "missing theme preset directory: $dir"
+    for preset in "$dir"/*.conf; do
+        [[ -e "$preset" ]] || continue
+        found=1
+        validate_theme_config "$preset"
+    done
+    (( found )) || die "no theme presets found in $dir"
 }
 
 snapshot_file() {
@@ -314,7 +632,7 @@ cmd_check() {
 }
 
 cmd_install() {
-    local snapshot dns4 rendered_nft
+    local snapshot dns4 rendered_nft file
     require_root
     require_linux_runtime
     validate_config "$SOURCE_CONFIG"
@@ -337,16 +655,32 @@ cmd_install() {
 
     mkdir -p -- "$(dirname -- "$LIVE_NFT")" "$(dirname -- "$LIVE_SYSCTL")"
     mkdir -p -- "$LIB_CONFIG/sysctl.d" "$LIB_CONFIG/ice" \
+        "$LIB_CONFIG/dotfiles/shell.d" "$LIB_CONFIG/dotfiles/prompt-themes" \
+        "$LIB_CONFIG/theme/presets" \
         "$(dirname -- "$INSTALLED_BIN")"
 
-    install -m 0644 -- "$rendered_nft" "$LIVE_NFT"
-    install -m 0644 -- "$SOURCE_CONFIG/sysctl.d/60-tkoc-hardening.conf" "$LIVE_SYSCTL"
-    install -m 0644 -- "$rendered_nft" "$LIB_CONFIG/nftables.conf"
-    install -m 0644 -- "$SOURCE_CONFIG/sysctl.d/60-tkoc-hardening.conf" \
+    install_staged_file 0644 "$rendered_nft" "$LIVE_NFT"
+    install_staged_file 0644 "$SOURCE_CONFIG/sysctl.d/60-tkoc-hardening.conf" "$LIVE_SYSCTL"
+    install_staged_file 0644 "$rendered_nft" "$LIB_CONFIG/nftables.conf"
+    install_staged_file 0644 "$SOURCE_CONFIG/sysctl.d/60-tkoc-hardening.conf" \
         "$LIB_CONFIG/sysctl.d/60-tkoc-hardening.conf"
-    install -m 0644 -- "$SOURCE_CONFIG/ice/packages.conf" \
+    install_staged_file 0644 "$SOURCE_CONFIG/ice/packages.conf" \
         "$LIB_CONFIG/ice/packages.conf"
-    install -m 0755 -- "$SCRIPT_DIR/tkoc" "$INSTALLED_BIN"
+    install_staged_file 0644 "$SOURCE_CONFIG/dotfiles/environment.conf" \
+        "$LIB_CONFIG/dotfiles/environment.conf"
+    install_staged_file 0644 "$SOURCE_CONFIG/dotfiles/bashrc.block" \
+        "$LIB_CONFIG/dotfiles/bashrc.block"
+    for file in "$SOURCE_CONFIG"/dotfiles/shell.d/*.sh; do
+        install_staged_file 0644 "$file" "$LIB_CONFIG/dotfiles/shell.d/${file##*/}"
+    done
+    for file in "$SOURCE_CONFIG"/dotfiles/prompt-themes/*.conf; do
+        install_staged_file 0644 "$file" "$LIB_CONFIG/dotfiles/prompt-themes/${file##*/}"
+    done
+    install_staged_file 0644 "$SOURCE_CONFIG/theme/kde.conf" "$LIB_CONFIG/theme/kde.conf"
+    for file in "$SOURCE_CONFIG"/theme/presets/*.conf; do
+        install_staged_file 0644 "$file" "$LIB_CONFIG/theme/presets/${file##*/}"
+    done
+    install_staged_file 0755 "$SCRIPT_DIR/tkoc" "$INSTALLED_BIN"
     rm -f -- "$rendered_nft"
     trap - EXIT
 
@@ -375,6 +709,21 @@ cmd_apply() {
     say "security baseline applied"
 }
 
+nftables_service_ready() {
+    local service_type remain_after_exit result
+    command -v systemctl >/dev/null 2>&1 || return 1
+    systemctl is-enabled --quiet nftables.service || return 1
+    systemctl is-active --quiet nftables.service && return 0
+
+    service_type="$(systemctl show nftables.service --property=Type --value 2>/dev/null)" \
+        || return 1
+    remain_after_exit="$(systemctl show nftables.service --property=RemainAfterExit --value 2>/dev/null)" \
+        || return 1
+    result="$(systemctl show nftables.service --property=Result --value 2>/dev/null)" \
+        || return 1
+    [[ "$service_type" == oneshot && "$remain_after_exit" == no && "$result" == success ]]
+}
+
 cmd_status() {
     require_root
     require_linux_runtime
@@ -386,8 +735,13 @@ cmd_status() {
 
     nft list table inet tkoc_host
     if command -v systemctl >/dev/null 2>&1; then
-        systemctl is-enabled nftables.service
-        systemctl is-active nftables.service
+        nftables_service_ready \
+            || die "nftables.service is disabled, failed, or has not loaded successfully"
+        if systemctl is-active --quiet nftables.service; then
+            say "nftables.service: enabled and active"
+        else
+            say "nftables.service: enabled; last one-shot load succeeded"
+        fi
     fi
 }
 
@@ -947,12 +1301,10 @@ cmd_audit() {
         audit_fail "tkoc_host firewall table is not loaded"
     fi
 
-    if command -v systemctl >/dev/null 2>&1 \
-        && systemctl is-enabled --quiet nftables.service \
-        && systemctl is-active --quiet nftables.service; then
-        audit_pass "nftables.service is enabled and active"
+    if nftables_service_ready; then
+        audit_pass "nftables.service is enabled and its loader state is healthy"
     else
-        audit_fail "nftables.service is not both enabled and active"
+        audit_fail "nftables.service is disabled, failed, or has not loaded successfully"
     fi
 
     audit_sysctl_policy
@@ -1104,6 +1456,479 @@ cmd_ice() {
     say "ice customization applied"
 }
 
+dotfiles_link_targets() {
+    printf '%s\t%s\t%s\n' \
+        "$SOURCE_CONFIG/dotfiles/shell.d" "$USER_DOTFILES_DIR/shell.d" "managed shell snippets" \
+        "$SOURCE_CONFIG/dotfiles/environment.conf" "$USER_DOTFILES_DIR/environment.conf" "managed environment variables" \
+        "$SOURCE_CONFIG/dotfiles/prompt-themes" "$USER_DOTFILES_DIR/prompt-themes" "managed prompt themes"
+}
+
+dotfile_link_status() {
+    local source="$1" target="$2"
+    if [[ -L "$target" && "$(readlink -- "$target")" == "$source" ]]; then
+        printf 'linked\n'
+    elif [[ -e "$target" || -L "$target" ]]; then
+        printf 'replace\n'
+    else
+        printf 'absent\n'
+    fi
+}
+
+ensure_user_snapshot() {
+    if [[ -z "$USER_BACKUP_SNAPSHOT" ]]; then
+        local id
+        id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+        USER_BACKUP_SNAPSHOT="$USER_BACKUP_DIR/$id"
+        mkdir -p -- "$USER_BACKUP_SNAPSHOT"
+        printf '%s\n' "$STATE_VERSION" >"$USER_BACKUP_SNAPSHOT/version"
+        ln -sfn -- "$id" "$USER_BACKUP_DIR/latest"
+    fi
+    printf '%s\n' "$USER_BACKUP_SNAPSHOT"
+}
+
+backup_user_path() {
+    local target="$1" name="$2" snapshot
+    snapshot="$(ensure_user_snapshot)"
+    cp -a -- "$target" "$snapshot/$name"
+    say "backed up existing $name to $snapshot/$name"
+}
+
+link_dotfile() {
+    local source="$1" target="$2" label="$3" status
+    status="$(dotfile_link_status "$source" "$target")"
+    if [[ "$status" == linked ]]; then
+        say "already linked: $label"
+        return 0
+    fi
+    mkdir -p -- "$(dirname -- "$target")"
+    [[ "$status" == replace ]] && backup_user_path "$target" "$(basename -- "$target")"
+    rm -rf -- "$target"
+    ln -sfn -- "$source" "$target"
+    say "linked: $label -> $source"
+}
+
+describe_dotfile_link() {
+    local source="$1" target="$2" label="$3" status
+    status="$(dotfile_link_status "$source" "$target")"
+    case "$status" in
+        linked) say "already linked: $label" ;;
+        replace) say "would back up and relink: $label" ;;
+        absent) say "would link: $label -> $source" ;;
+    esac
+}
+
+bashrc_block_status() {
+    local block_file="$1" bashrc="$2" current
+    [[ -e "$bashrc" ]] || { printf 'missing\n'; return; }
+    grep -Fq '# >>> tkoc >>>' "$bashrc" || { printf 'missing\n'; return; }
+    current="$(sed -n '/# >>> tkoc >>>/,/# <<< tkoc <<</p' "$bashrc")"
+    if diff -q <(printf '%s\n' "$current") "$block_file" >/dev/null 2>&1; then
+        printf 'current\n'
+    else
+        printf 'stale\n'
+    fi
+}
+
+describe_bashrc_block() {
+    local block_file="$1" bashrc="$2" status
+    status="$(bashrc_block_status "$block_file" "$bashrc")"
+    case "$status" in
+        current) say "already up to date: $bashrc" ;;
+        missing) say "would append managed block to: $bashrc" ;;
+        stale) say "would update managed block in: $bashrc" ;;
+    esac
+}
+
+sync_bashrc_block() {
+    local block_file="$1" bashrc="$2" status
+    status="$(bashrc_block_status "$block_file" "$bashrc")"
+    case "$status" in
+        current)
+            say "already up to date: $bashrc"
+            ;;
+        missing)
+            [[ -e "$bashrc" ]] && backup_user_path "$bashrc" "$(basename -- "$bashrc")"
+            {
+                [[ -s "$bashrc" ]] && printf '\n'
+                cat -- "$block_file"
+            } >>"$bashrc"
+            say "appended managed block to $bashrc"
+            ;;
+        stale)
+            backup_user_path "$bashrc" "$(basename -- "$bashrc")"
+            awk -v block="$block_file" '
+                /# >>> tkoc >>>/ {
+                    skip=1
+                    while ((getline line < block) > 0) print line
+                    close(block)
+                    next
+                }
+                /# <<< tkoc <<</ { skip=0; next }
+                skip { next }
+                { print }
+            ' "$bashrc" >"$bashrc.tkoc-tmp"
+            mv -- "$bashrc.tkoc-tmp" "$bashrc"
+            say "updated managed block in $bashrc"
+            ;;
+    esac
+}
+
+legacy_theme_number_to_name() {
+    case "$1" in
+        1) printf 'arch\n' ;;
+        2) printf 'docker\n' ;;
+        3) printf 'ubuntu\n' ;;
+        4) printf 'fedora\n' ;;
+        5) printf 'debian\n' ;;
+        6) printf 'pink\n' ;;
+        7) printf 'macos\n' ;;
+        8) printf 'music\n' ;;
+        9) printf 'rainbow\n' ;;
+        10) printf 'terminal\n' ;;
+        11) printf 'lightning\n' ;;
+        12) printf 'fire\n' ;;
+        13) printf 'space\n' ;;
+        *) printf 'arch\n' ;;
+    esac
+}
+
+detect_legacy_prompt_theme() {
+    local bashrc="$1"
+    grep -Fq '# SECTION 3: THEME SYSTEM' "$bashrc" 2>/dev/null \
+        && grep -Fq '# SECTION 7: STARTUP COMMANDS' "$bashrc" 2>/dev/null
+}
+
+strip_legacy_prompt_theme() {
+    local bashrc="$1"
+    awk '
+        /^# SECTION 3: THEME SYSTEM/ { skip=1 }
+        /^# SECTION 7: STARTUP COMMANDS/ { skip=0 }
+        !skip { print }
+    ' "$bashrc"
+}
+
+describe_legacy_prompt_theme() {
+    local bashrc="$1"
+    if detect_legacy_prompt_theme "$bashrc"; then
+        say "would ask to migrate the existing hand-written prompt theme in $bashrc (a backup decision is made at runtime, not decided in advance)"
+    fi
+}
+
+migrate_legacy_prompt_theme() {
+    local bashrc="$1" reply legacy_number=1 legacy_name stripped
+    detect_legacy_prompt_theme "$bashrc" || return 0
+
+    [[ -f "$HOME/.bash_theme" ]] && legacy_number="$(<"$HOME/.bash_theme")"
+    legacy_name="$(legacy_theme_number_to_name "$legacy_number")"
+
+    say "existing hand-written prompt theme detected in $bashrc (currently: $legacy_name)"
+    if [[ "${TKOC_DOTFILES_BACKUP:-}" == yes || "${TKOC_DOTFILES_BACKUP:-}" == no ]]; then
+        reply="$TKOC_DOTFILES_BACKUP"
+    elif [[ -t 0 ]]; then
+        read -r -p "back up $bashrc before removing that section? [Y/n]: " reply
+        [[ -z "$reply" ]] && reply=yes
+    else
+        die "cannot ask whether to back up $bashrc without a terminal; set TKOC_DOTFILES_BACKUP=yes or TKOC_DOTFILES_BACKUP=no and run dotfiles again"
+    fi
+
+    case "$reply" in
+        [Yy]*|yes) backup_user_path "$bashrc" "$(basename -- "$bashrc")" ;;
+        [Nn]*|no) say "proceeding without a backup, as instructed" ;;
+        *) die "unrecognized answer: $reply" ;;
+    esac
+
+    stripped="$(strip_legacy_prompt_theme "$bashrc")"
+    printf '%s\n' "$stripped" >"$bashrc.tkoc-tmp"
+    mv -- "$bashrc.tkoc-tmp" "$bashrc"
+    mkdir -p -- "$(dirname -- "$USER_PROMPT_THEME_FILE")"
+    printf '%s\n' "$legacy_name" >"$USER_PROMPT_THEME_FILE"
+    say "migrated existing prompt theme to tkoc (selected: $legacy_name)"
+}
+
+ensure_prompt_theme_selected() {
+    [[ -f "$USER_PROMPT_THEME_FILE" ]] && return 0
+    mkdir -p -- "$(dirname -- "$USER_PROMPT_THEME_FILE")"
+    printf 'arch\n' >"$USER_PROMPT_THEME_FILE"
+}
+
+cmd_dotfiles_apply() {
+    local mode="${1:-}" source target label
+    require_not_root
+    validate_dotfiles_config "$SOURCE_CONFIG"
+
+    if [[ "$mode" == --dry-run ]]; then
+        while IFS=$'\t' read -r source target label; do
+            describe_dotfile_link "$source" "$target" "$label"
+        done < <(dotfiles_link_targets)
+        describe_bashrc_block "$SOURCE_CONFIG/dotfiles/bashrc.block" "$USER_BASHRC"
+        describe_legacy_prompt_theme "$USER_BASHRC"
+        say "dry run: no files were modified"
+        return 0
+    fi
+
+    while IFS=$'\t' read -r source target label; do
+        link_dotfile "$source" "$target" "$label"
+    done < <(dotfiles_link_targets)
+    migrate_legacy_prompt_theme "$USER_BASHRC"
+    ensure_prompt_theme_selected
+    sync_bashrc_block "$SOURCE_CONFIG/dotfiles/bashrc.block" "$USER_BASHRC"
+
+    [[ -n "$USER_BACKUP_SNAPSHOT" ]] && say "backup: $USER_BACKUP_SNAPSHOT"
+    say "dotfiles deployed"
+}
+
+cmd_dotfiles_list_themes() {
+    local file name current=""
+    local -a names=()
+    [[ -r "$USER_PROMPT_THEME_FILE" ]] && current="$(<"$USER_PROMPT_THEME_FILE")"
+    for file in "$SOURCE_CONFIG"/dotfiles/prompt-themes/*.conf; do
+        [[ -e "$file" ]] || continue
+        name="$(basename -- "$file" .conf)"
+        names+=("$name")
+    done
+    (( ${#names[@]} > 0 )) || die "no prompt themes found"
+
+    say "available prompt themes:"
+    for name in "${names[@]}"; do
+        if [[ "$name" == "$current" ]]; then
+            say "  $name (current)"
+        else
+            say "  $name"
+        fi
+    done
+    say "switch with: tkoc dotfiles set-theme <name>"
+}
+
+cmd_dotfiles_set_theme() {
+    local name="${1:-}" mode="${2:-}" preset
+    [[ -n "$name" ]] || die "dotfiles set-theme requires a theme name (see: tkoc dotfiles list-themes)"
+    [[ -z "$mode" || "$mode" == --dry-run ]] \
+        || die "dotfiles set-theme accepts a theme name and optionally --dry-run"
+    preset="$SOURCE_CONFIG/dotfiles/prompt-themes/$name.conf"
+    [[ -r "$preset" ]] || die "unknown prompt theme: $name (see: tkoc dotfiles list-themes)"
+    validate_prompt_theme_config "$preset"
+
+    if [[ "$mode" == --dry-run ]]; then
+        say "would select prompt theme: $name"
+        return 0
+    fi
+
+    require_not_root
+    mkdir -p -- "$(dirname -- "$USER_PROMPT_THEME_FILE")"
+    printf '%s\n' "$name" >"$USER_PROMPT_THEME_FILE"
+    say "selected prompt theme: $name"
+    cmd_dotfiles_apply ""
+}
+
+cmd_dotfiles() {
+    local subcommand="${1:-}"
+    case "$subcommand" in
+        list-themes)
+            shift
+            [[ $# -eq 0 ]] || die "dotfiles list-themes takes no arguments"
+            cmd_dotfiles_list_themes
+            ;;
+        set-theme)
+            shift
+            cmd_dotfiles_set_theme "$@"
+            ;;
+        ""|--dry-run)
+            cmd_dotfiles_apply "$subcommand"
+            ;;
+        *) die "unknown dotfiles subcommand: $subcommand (see: tkoc dotfiles --help)" ;;
+    esac
+}
+
+THEME_APPLIED=0
+THEME_SKIPPED=0
+THEME_FONT_CHANGED=0
+
+read_theme_config() {
+    local file="$1" key value
+    while IFS='=' read -r key value || [[ -n "$key" ]]; do
+        [[ "$key" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+        key="${key%%[[:space:]]*}"
+        [[ -z "$key" ]] && continue
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        printf '%s\t%s\n' "$key" "$value"
+    done <"$file"
+}
+
+theme_current_kdeglobals() {
+    local group="$1" key="$2"
+    command -v kreadconfig6 >/dev/null 2>&1 || return 1
+    kreadconfig6 --file kdeglobals --group "$group" --key "$key" 2>/dev/null
+}
+
+apply_theme_look_and_feel() {
+    local value="$1"
+    if ! command -v plasma-apply-lookandfeel >/dev/null 2>&1; then
+        say "skipped LOOK_AND_FEEL: plasma-apply-lookandfeel is not installed"
+        THEME_SKIPPED=$((THEME_SKIPPED + 1))
+        return
+    fi
+    plasma-apply-lookandfeel --apply "$value" >/dev/null
+    say "applied LOOK_AND_FEEL: $value"
+    THEME_APPLIED=$((THEME_APPLIED + 1))
+}
+
+apply_theme_color_scheme() {
+    local value="$1"
+    if ! command -v plasma-apply-colorscheme >/dev/null 2>&1; then
+        say "skipped COLOR_SCHEME: plasma-apply-colorscheme is not installed"
+        THEME_SKIPPED=$((THEME_SKIPPED + 1))
+        return
+    fi
+    plasma-apply-colorscheme "$value" >/dev/null
+    say "applied COLOR_SCHEME: $value"
+    THEME_APPLIED=$((THEME_APPLIED + 1))
+}
+
+apply_theme_cursor_theme() {
+    local value="$1"
+    if ! command -v plasma-apply-cursortheme >/dev/null 2>&1; then
+        say "skipped CURSOR_THEME: plasma-apply-cursortheme is not installed"
+        THEME_SKIPPED=$((THEME_SKIPPED + 1))
+        return
+    fi
+    plasma-apply-cursortheme "$value" >/dev/null
+    say "applied CURSOR_THEME: $value"
+    THEME_APPLIED=$((THEME_APPLIED + 1))
+}
+
+apply_theme_icon_theme() {
+    local value="$1" current
+    if ! command -v kwriteconfig6 >/dev/null 2>&1; then
+        say "skipped ICON_THEME: kwriteconfig6 is not installed"
+        THEME_SKIPPED=$((THEME_SKIPPED + 1))
+        return
+    fi
+    current="$(theme_current_kdeglobals Icons Theme || true)"
+    if [[ "$current" == "$value" ]]; then
+        say "already set: ICON_THEME"
+        return
+    fi
+    kwriteconfig6 --file kdeglobals --group Icons --key Theme "$value"
+    command -v kbuildsycoca6 >/dev/null 2>&1 && kbuildsycoca6 --noincremental >/dev/null 2>&1
+    say "applied ICON_THEME: $value"
+    THEME_APPLIED=$((THEME_APPLIED + 1))
+}
+
+apply_theme_font() {
+    local group_key="$1" value="$2" label="$3" current
+    if ! command -v kwriteconfig6 >/dev/null 2>&1; then
+        say "skipped $label: kwriteconfig6 is not installed"
+        THEME_SKIPPED=$((THEME_SKIPPED + 1))
+        return
+    fi
+    current="$(theme_current_kdeglobals General "$group_key" || true)"
+    if [[ "$current" == "$value" ]]; then
+        say "already set: $label"
+        return
+    fi
+    kwriteconfig6 --file kdeglobals --group General --key "$group_key" "$value"
+    say "applied $label: $value"
+    THEME_APPLIED=$((THEME_APPLIED + 1))
+    THEME_FONT_CHANGED=1
+}
+
+apply_theme_setting() {
+    local key="$1" value="$2"
+    case "$key" in
+        LOOK_AND_FEEL) apply_theme_look_and_feel "$value" ;;
+        COLOR_SCHEME) apply_theme_color_scheme "$value" ;;
+        CURSOR_THEME) apply_theme_cursor_theme "$value" ;;
+        ICON_THEME) apply_theme_icon_theme "$value" ;;
+        FONT_GENERAL) apply_theme_font font "$value" FONT_GENERAL ;;
+        FONT_FIXED_WIDTH) apply_theme_font fixed "$value" FONT_FIXED_WIDTH ;;
+        *) die "unrecognized theme key: $key" ;;
+    esac
+}
+
+describe_theme_setting() {
+    local key="$1" value="$2" tool=""
+    case "$key" in
+        LOOK_AND_FEEL) tool=plasma-apply-lookandfeel ;;
+        COLOR_SCHEME) tool=plasma-apply-colorscheme ;;
+        CURSOR_THEME) tool=plasma-apply-cursortheme ;;
+        ICON_THEME|FONT_GENERAL|FONT_FIXED_WIDTH) tool=kwriteconfig6 ;;
+    esac
+    if command -v "$tool" >/dev/null 2>&1; then
+        say "would apply $key: $value"
+    else
+        say "would skip $key: $tool is not installed"
+    fi
+}
+
+cmd_theme_apply() {
+    local manifest="$1" mode="${2:-}" key value
+    require_not_root
+    validate_theme_config "$manifest"
+
+    if [[ "$mode" == --dry-run ]]; then
+        while IFS=$'\t' read -r key value; do
+            describe_theme_setting "$key" "$value"
+        done < <(read_theme_config "$manifest")
+        say "dry run: no theme settings were changed"
+        return 0
+    fi
+
+    THEME_APPLIED=0
+    THEME_SKIPPED=0
+    THEME_FONT_CHANGED=0
+    while IFS=$'\t' read -r key value; do
+        apply_theme_setting "$key" "$value"
+    done < <(read_theme_config "$manifest")
+
+    (( THEME_FONT_CHANGED )) \
+        && say "font changes require logging out and back in (or restarting plasmashell) to take effect everywhere"
+    say "theme summary: $THEME_APPLIED applied, $THEME_SKIPPED skipped"
+}
+
+cmd_theme_list() {
+    local file name
+    local -a names=()
+    for file in "$SOURCE_CONFIG"/theme/presets/*.conf; do
+        [[ -e "$file" ]] || continue
+        names+=("$(basename -- "$file" .conf)")
+    done
+    (( ${#names[@]} > 0 )) || die "no theme presets found"
+
+    say "available theme presets:"
+    printf '  %s\n' "${names[@]}"
+    say "apply one with: tkoc theme set <name>"
+}
+
+cmd_theme_set() {
+    local name="${1:-}" mode="${2:-}" manifest
+    [[ -n "$name" ]] || die "theme set requires a preset name (see: tkoc theme list)"
+    [[ -z "$mode" || "$mode" == --dry-run ]] \
+        || die "theme set accepts a preset name and optionally --dry-run"
+    manifest="$SOURCE_CONFIG/theme/presets/$name.conf"
+    [[ -r "$manifest" ]] || die "unknown theme preset: $name (see: tkoc theme list)"
+    cmd_theme_apply "$manifest" "$mode"
+}
+
+cmd_theme() {
+    local subcommand="${1:-}"
+    case "$subcommand" in
+        list)
+            shift
+            [[ $# -eq 0 ]] || die "theme list takes no arguments"
+            cmd_theme_list
+            ;;
+        set)
+            shift
+            cmd_theme_set "$@"
+            ;;
+        ""|--dry-run)
+            cmd_theme_apply "$SOURCE_CONFIG/theme/kde.conf" "$subcommand"
+            ;;
+        *) die "unknown theme subcommand: $subcommand (see: tkoc theme --help)" ;;
+    esac
+}
+
 cmd_backups() {
     require_root
     if [[ ! -d "$BACKUP_DIR" ]]; then
@@ -1135,6 +1960,12 @@ cmd_rollback() {
 main() {
     local command="${1:-help}"
     shift || true
+
+    if command_known "$command" && [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
+        show_command_help "$command"
+        return 0
+    fi
+
     case "$command" in
         check) [[ $# -eq 0 ]] || die "check takes no arguments"; cmd_check ;;
         install) [[ $# -eq 0 ]] || die "install takes no arguments"; cmd_install ;;
@@ -1144,6 +1975,8 @@ main() {
         doctor) [[ $# -eq 0 ]] || die "doctor takes no arguments"; cmd_doctor ;;
         gut) [[ $# -le 1 ]] || die "gut accepts at most one argument"; cmd_gut "$@" ;;
         ice) [[ $# -le 1 ]] || die "ice accepts at most one argument"; cmd_ice "$@" ;;
+        dotfiles) [[ $# -le 3 ]] || die "too many arguments to dotfiles"; cmd_dotfiles "$@" ;;
+        theme) [[ $# -le 3 ]] || die "too many arguments to theme"; cmd_theme "$@" ;;
         backups) [[ $# -eq 0 ]] || die "backups takes no arguments"; cmd_backups ;;
         rollback) [[ $# -le 1 ]] || die "rollback accepts at most one backup ID"; cmd_rollback "$@" ;;
         help|-h|--help) usage ;;

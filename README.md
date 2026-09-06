@@ -18,7 +18,8 @@ The first release intentionally contains only the foundation:
 
 It does **not** install desktop applications, themes, containers, virtual
 machines, or background agents as part of the security baseline. Optional,
-explicit customization is kept separate under the `ice` command.
+explicit customization is kept separate under the `ice`, `dotfiles`, and
+`theme` commands.
 
 ## Security model
 
@@ -120,6 +121,68 @@ The command validates package names, skips packages that are already installed,
 and asks `pacman` to install only those still missing. It never runs as part of
 `check`, `install`, `apply`, or `audit`; `install` only stages the manifest for
 later use by the installed `tkoc` command.
+
+## Personal provisioning (opt-in, user-scoped)
+
+`dotfiles` and `theme` are opt-in like `ice`, but unlike every other tkoc
+command they run as your normal user and refuse to run under `sudo` or as
+root: they only ever touch your own `$HOME`, `$XDG_CONFIG_HOME`, and
+`$XDG_STATE_HOME`, never system files. For a broader app inventory, add
+packages to `config/ice/packages.conf`; `dotfiles` and `theme` do not install
+packages themselves.
+
+### Shell environment (`dotfiles`)
+
+`dotfiles` symlinks a managed shell-snippet directory, an environment-variable
+file, and a library of named prompt themes from `config/dotfiles/` into
+`$XDG_CONFIG_HOME/tkoc/dotfiles/`, and appends a small guarded block to
+`~/.bashrc` that sources those snippets. Re-running it is a no-op once
+everything is linked; anything it would replace is backed up first.
+
+```sh
+tkoc dotfiles --dry-run
+tkoc dotfiles
+tkoc dotfiles list-themes
+tkoc dotfiles set-theme nord
+```
+
+If a hand-written prompt-theme system is still present in `~/.bashrc`,
+`dotfiles` offers to migrate it: it always removes the old section, but asks
+an explicit `[Y/n]` question at runtime to decide whether to back it up first
+(set `TKOC_DOTFILES_BACKUP=yes` or `TKOC_DOTFILES_BACKUP=no` to answer
+non-interactively). The theme you had selected is carried over automatically.
+
+### Desktop theme (`theme`)
+
+`theme` applies the KDE Plasma color scheme, icon theme, cursor theme, global
+theme ("look and feel"), and fonts, using `plasma-apply-lookandfeel`,
+`plasma-apply-colorscheme`, `plasma-apply-cursortheme`, and `kwriteconfig6`.
+Settings whose tool isn't installed are skipped, not treated as an error.
+Font changes take effect after logging out and back in (or restarting
+`plasmashell`); everything else applies immediately to the running session.
+
+Plain `tkoc theme` applies your own hand-edited profile at
+`config/theme/kde.conf`. `tkoc theme list`/`tkoc theme set <name>` apply one
+of the named presets shipped under `config/theme/presets/` instead
+(`breeze-dark`, `breeze-light`, `manjaro`, `nord`, `sweet`).
+
+```sh
+tkoc theme --dry-run
+tkoc theme
+tkoc theme list
+tkoc theme set nord
+```
+
+### Detailed help
+
+Every command accepts `--help` for a longer description, its exact usage, and
+examples:
+
+```sh
+tkoc --help
+tkoc install --help
+tkoc theme --help
+```
 
 List recovery points or restore one:
 
