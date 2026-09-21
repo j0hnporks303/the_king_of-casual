@@ -18,6 +18,16 @@ else
   hc_disable_unit sshd.socket "socket-activated remote login"
 fi
 
+# sshd-unix-local.socket is deliberately left alone. systemd-ssh-generator
+# creates it to accept ssh over an AF_UNIX path under /run -- local IPC, not a
+# TCP/22 listener, and unreachable from off this machine. It stays "active
+# listening" in systemctl after sshd itself is off, which looks like the
+# shutdown failed. It did not.
+if unit_exists sshd-unix-local.socket; then
+  skip "sshd-unix-local.socket left alone (local AF_UNIX IPC, not a TCP/22 listener)"
+  tally_skip
+fi
+
 # Cockpit is Fedora's web admin console. It is socket-activated on 9090 and is
 # enabled by default on Server; on Workstation it is usually just installed.
 hc_disable_unit cockpit.socket "web admin console on 9090"

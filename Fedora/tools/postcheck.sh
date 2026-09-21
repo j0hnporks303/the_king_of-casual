@@ -61,8 +61,26 @@ for _unit in sshd.service cockpit.socket avahi-daemon.service cups-browsed.servi
   line "$_unit" "$(unit_state "$_unit")"
 done
 unset _unit
+# A bare count invites the obvious question -- "14 of what?" -- so name them.
+# Sockets bound to loopback or an AF_UNIX path are separated from the ones
+# actually reachable from another machine, because that is the distinction
+# that matters and it is not visible in `systemctl`.
 if command -v ss >/dev/null 2>&1; then
-  line "listening sockets" "$(ss -H -lntu 2>/dev/null | wc -l | tr -d '[:space:]') (see: tkoc uav show all)"
+  _all="$(ss -H -lntu 2>/dev/null | wc -l | tr -d '[:space:]')"
+  _offhost="$(ss -H -lntu 2>/dev/null \
+    | awk '$5 !~ /^(127\.|\[::1\]|\*:68$)/ { print $5 }' | sort -u)"
+  _offcount="$(printf '%s' "$_offhost" | grep -c . || true)"
+  line "listening sockets" "${_all:-0} total, ${_offcount:-0} not loopback-only"
+  if [[ "${_offcount:-0}" != 0 ]]; then
+    printf '%s\n' "$_offhost" | sed 's/^/      /'
+    printf '      (the firewall still decides what reaches these: tkoc uav show all)\n'
+  fi
+  unset _all _offhost _offcount
+fi
+# systemd-ssh-generator creates this; it is an AF_UNIX path under /run, not
+# TCP/22. It stays "listening" after sshd is off, which looks wrong and is not.
+if unit_exists sshd-unix-local.socket; then
+  line "sshd-unix-local.socket" "local AF_UNIX only, not a network listener"
 fi
 
 section "Recovery"

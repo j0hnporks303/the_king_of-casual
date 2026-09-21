@@ -58,8 +58,10 @@ elif [[ -r "$LIVE_NFT" ]]; then
   elif [ "${lan:-0}" -gt 0 ]; then tier=strong
   else tier=vanilla; fi
   line "inferred tier" "$tier"
+elif [[ -d "$(dirname -- "$LIVE_NFT")" ]]; then
+  line "policy file" "absent from $(dirname -- "$LIVE_NFT") (run: tkoc firewall strong)"
 else
-  line "policy file" "not installed (run: tkoc firewall strong)"
+  line "policy file" "not installed; $(dirname -- "$LIVE_NFT") does not exist (run: tkoc firewall strong)"
 fi
 
 printf '\nBoot persistence\n'
