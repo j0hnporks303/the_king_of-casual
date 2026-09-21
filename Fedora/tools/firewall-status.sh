@@ -30,45 +30,62 @@ HELP
 line() { printf '  %-34s %s\n' "$1" "$2"; }
 
 printf '\nInstalled policy\n'
-# "cannot read it" and "it is not there" are different answers, and reporting
-# the first as the second told people their firewall was not installed when it
-# was.
-if [[ -e "$LIVE_NFT" && ! -r "$LIVE_NFT" ]]; then
-  line "policy file" "$LIVE_NFT (not readable by you; try: sudo tkoc firewall status)"
-elif [[ -r "$LIVE_NFT" ]]; then
+# /etc/nftables is root-only on Fedora, so [[ -e ]] / [[ -r ]] on a file inside
+# it answer "no" for an ordinary user regardless of whether the file is there.
+# Read it the way everything else does and distinguish the three real cases:
+# present, present-but-unreadable, genuinely absent.
+_policy="$(read_root_file_quiet "$LIVE_NFT" 2>/dev/null)" && _have=yes || _have=no
+
+if [[ "$_have" == yes ]]; then
   line "policy file" "$LIVE_NFT"
   # Which tier a machine is on is readable from the policy itself: each tier
   # leaves its markers commented or live, so this needs no recorded state.
-  lan=$(grep -cE '^\s+udp dport \{ 137, 138' "$LIVE_NFT" || true)
-  ipv6=$(grep -cE '^\s+meta nfproto ipv6' "$LIVE_NFT" || true)
-  dns=$(grep -cE '^\s+ip daddr \$ALLOWED_DNS4' "$LIVE_NFT" || true)
-  ssh=$(grep -cE '^\s+ip saddr \$SSH_SOURCE' "$LIVE_NFT" || true)
+  lan=$(grep -cE '^\s+udp dport \{ 137, 138' <<<"$_policy" || true)
+  ipv6=$(grep -cE '^\s+meta nfproto ipv6' <<<"$_policy" || true)
+  dns=$(grep -cE '^\s+ip daddr \$ALLOWED_DNS4' <<<"$_policy" || true)
+  ssh=$(grep -cE '^\s+ip saddr \$SSH_SOURCE' <<<"$_policy" || true)
   line "LAN discovery blocked" "$([ "${lan:-0}" -gt 0 ] && echo yes || echo no)"
   line "off-host IPv6 blocked" "$([ "${ipv6:-0}" -gt 0 ] && echo yes || echo no)"
   line "DNS pinned to a resolver" "$([ "${dns:-0}" -gt 0 ] && echo yes || echo no)"
   line "inbound SSH carve-out" "$([ "${ssh:-0}" -gt 0 ] && echo yes || echo no)"
   if [ "${dns:-0}" -gt 0 ]; then
-    line "allowed resolver" "$(awk -F'[{}]' '/^define ALLOWED_DNS4/ { gsub(/ /, "", $2); print $2; exit }' "$LIVE_NFT")"
+    line "allowed resolver" "$(awk -F'[{}]' '/^define ALLOWED_DNS4/ { gsub(/ /, "", $2); print $2; exit }' <<<"$_policy")"
   fi
   if [ "${ssh:-0}" -gt 0 ]; then
-    line "ssh source" "$(awk -F'[{}]' '/^define SSH_SOURCE/ { gsub(/ /, "", $2); print $2; exit }' "$LIVE_NFT")"
+    line "ssh source" "$(awk -F'[{}]' '/^define SSH_SOURCE/ { gsub(/ /, "", $2); print $2; exit }' <<<"$_policy")"
   fi
   # Inferred tier, in the same order the stage decides it.
   if [ "${dns:-0}" -gt 0 ]; then tier=lockdown
   elif [ "${lan:-0}" -gt 0 ]; then tier=strong
   else tier=vanilla; fi
   line "inferred tier" "$tier"
-elif [[ -d "$(dirname -- "$LIVE_NFT")" ]]; then
-  line "policy file" "absent from $(dirname -- "$LIVE_NFT") (run: tkoc firewall strong)"
+elif root_path_exists "$LIVE_NFT"; then
+  line "policy file" "$LIVE_NFT (present; needs privilege to read)"
+  line "tier" "run 'sudo tkoc firewall status' to read it"
 else
-  line "policy file" "not installed; $(dirname -- "$LIVE_NFT") does not exist (run: tkoc firewall strong)"
+  line "policy file" "not installed (run: tkoc firewall strong)"
 fi
+unset _policy _have
 
 printf '\nBoot persistence\n'
+# systemctl's is-enabled/is-active print their answer on stdout *and* exit
+# non-zero for anything that is not enabled/active. `$(cmd || echo fallback)`
+# therefore captured the real answer and the fallback, printing both -- which
+# is where the stray "inactive (good)" line on its own row came from.
+unit_report() {
+  local value
+  value="$(systemctl "$1" "$2" 2>/dev/null)" || true
+  printf '%s' "${value:-not installed}"
+}
 if command -v systemctl >/dev/null 2>&1; then
-  line "nftables.service enabled" "$(systemctl is-enabled nftables.service 2>/dev/null || echo 'not installed')"
-  line "nftables.service active" "$(systemctl is-active nftables.service 2>/dev/null || echo inactive)"
-  line "firewalld" "$(systemctl is-active firewalld.service 2>/dev/null || echo 'inactive (good)')"
+  line "nftables.service enabled" "$(unit_report is-enabled nftables.service)"
+  line "nftables.service active" "$(unit_report is-active nftables.service)"
+  _fw="$(unit_report is-active firewalld.service)"
+  case "$_fw" in
+    active) line "firewalld" "$_fw -- it also manages nftables; see 'tkoc audit'" ;;
+    *)      line "firewalld" "$_fw (good: nothing competes for the ruleset)" ;;
+  esac
+  unset _fw
 else
   line "systemd" "unavailable"
 fi

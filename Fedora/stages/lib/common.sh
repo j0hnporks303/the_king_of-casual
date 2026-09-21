@@ -602,6 +602,41 @@ read_root_file() {
   fi
 }
 
+# Same, but never prompts: it uses a cached sudo credential if one happens to
+# exist and otherwise gives up. Read-only commands (status, uav, firewall
+# status) use this, because a report that stops to ask for a password is worse
+# than a report that says which line it could not fill in.
+read_root_file_quiet() {
+  local target="$1"
+  [[ -e "$target" ]] && [[ -r "$target" ]] && { cat -- "$target"; return 0; }
+  [[ -n "${TKOC_TEST_ROOT:-}" ]] && return 1
+  [[ ${EUID:-$(id -u)} -eq 0 ]] && { [[ -e "$target" ]] || return 1; cat -- "$target"; return 0; }
+  sudo -n cat -- "$target" 2>/dev/null || return 1
+}
+
+# Whether a path exists, answered correctly when its parent directory is not
+# traversable by this user.
+#
+# /etc/nftables is root-only on Fedora, so a plain [[ -e ]] on a file inside it
+# returns false for an ordinary user whether or not the file is there. Reporting
+# that as "not installed" told people their firewall was missing while it was
+# loaded and running.
+root_path_exists() {
+  local target="$1"
+  [[ -e "$target" ]] && return 0
+  [[ -n "${TKOC_TEST_ROOT:-}" ]] && return 1
+  [[ ${EUID:-$(id -u)} -eq 0 ]] && return 1
+  # Only meaningful when we cannot even look; if the parent is traversable the
+  # [[ -e ]] above was already authoritative.
+  [[ -x "$(_tkoc_dirname_common "$target")" ]] && return 1
+  sudo -n test -e "$target" 2>/dev/null
+}
+
+_tkoc_dirname_common() {
+  local p="${1%/}"
+  case "$p" in */*) printf '%s' "${p%/*}" ;; *) printf '.' ;; esac
+}
+
 # The mode a file already has, so rewriting it preserves the distribution's
 # choice instead of imposing ours.
 existing_mode() {

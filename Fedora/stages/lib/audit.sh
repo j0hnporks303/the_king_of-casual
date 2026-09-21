@@ -37,7 +37,7 @@ audit_read_lines() {
   local _name="$1" _line _i=0
   eval "$_name=()"
   while IFS= read -r _line; do
-    eval "$_name[\$_i]=\$_line"
+    eval "${_name}[\$_i]=\$_line"
     _i=$(( _i + 1 ))
   done
 }

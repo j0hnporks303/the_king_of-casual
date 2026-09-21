@@ -96,15 +96,20 @@ show_containers() {
 
 show_firewall() {
   head_ "Inbound allowed by the tkoc policy"
-  local live="${TKOC_TEST_ROOT:-}/etc/nftables/tkoc.nft"
-  if [[ ! -r "$live" ]]; then
-    note "no tkoc policy is installed (run: tkoc firewall strong)"
+  local live="${TKOC_TEST_ROOT:-}/etc/nftables/tkoc.nft" policy
+  # /etc/nftables is root-only on Fedora, so a plain read fails for an ordinary
+  # user whether or not the policy is there.
+  if ! policy="$(read_root_file_quiet "$live" 2>/dev/null)"; then
+    if root_path_exists "$live"; then
+      note "the tkoc policy is installed but needs privilege to read"
+      note "run: sudo tkoc uav show firewall"
+    else
+      note "no tkoc policy is installed (run: tkoc firewall strong)"
+    fi
     return 0
   fi
-  # Report from the installed policy rather than the live table so this works
-  # without privilege; `tkoc firewall status` shows the live one.
   local allows
-  allows="$(grep -nE '^\s+(ip saddr \$SSH_SOURCE|udp dport \$WG_PORT|tcp dport [0-9]+ ct state new)' "$live" || true)"
+  allows="$(grep -nE '^\s+(ip saddr \$SSH_SOURCE|udp dport \$WG_PORT|tcp dport [0-9]+ ct state new)' <<<"$policy" || true)"
   if [[ -n "$allows" ]]; then
     printf '%s\n' "$allows" | sed 's/^/    /'
   else
@@ -168,10 +173,14 @@ check_port() {
         note "nothing is listening on $port locally"
       fi
     fi
-    local live="${TKOC_TEST_ROOT:-}/etc/nftables/tkoc.nft"
-    if [[ ! -r "$live" ]]; then
-      note "no tkoc policy is installed, so nothing here governs $port"
-    elif grep -qE "^[[:space:]]+.*dport.*[^0-9]${port}([^0-9]|$).*accept" "$live"; then
+    local live="${TKOC_TEST_ROOT:-}/etc/nftables/tkoc.nft" policy
+    if ! policy="$(read_root_file_quiet "$live" 2>/dev/null)"; then
+      if root_path_exists "$live"; then
+        note "the tkoc policy needs privilege to read (sudo tkoc uav $port)"
+      else
+        note "no tkoc policy is installed, so nothing here governs $port"
+      fi
+    elif grep -qE "^[[:space:]]+.*dport.*[^0-9]${port}([^0-9]|$).*accept" <<<"$policy"; then
       note "the tkoc policy has an explicit inbound accept for $port"
     else
       note "the tkoc policy has no inbound accept for $port (default-deny applies)"

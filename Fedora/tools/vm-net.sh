@@ -34,10 +34,23 @@ reloads, so it survives a reboot. Re-applying a firewall tier resets it to on.
 HELP
 }
 
+# POLICY_BODY is filled here and reused, so the file is read once and through
+# the privileged reader -- /etc/nftables is root-only on Fedora.
+POLICY_BODY=""
 require_policy() {
-  [[ -r "$LIVE_NFT" ]] \
-    || die "no firewall policy is installed at $LIVE_NFT (run: tkoc firewall strong)"
-  grep -Fq "$BEGIN_MARKER" "$LIVE_NFT" \
+  local prompting="${1:-quiet}"
+  if [[ "$prompting" == prompting ]]; then
+    POLICY_BODY="$(read_root_file "$LIVE_NFT" 2>/dev/null)" || POLICY_BODY=""
+  else
+    POLICY_BODY="$(read_root_file_quiet "$LIVE_NFT" 2>/dev/null)" || POLICY_BODY=""
+  fi
+  if [[ -z "$POLICY_BODY" ]]; then
+    if root_path_exists "$LIVE_NFT"; then
+      die "the firewall policy at $LIVE_NFT needs privilege to read (try: sudo tkoc vm net status)"
+    fi
+    die "no firewall policy is installed at $LIVE_NFT (run: tkoc firewall strong)"
+  fi
+  grep -Fq "$BEGIN_MARKER" <<<"$POLICY_BODY" \
     || die "the installed policy has no VM block; re-apply a tier to refresh it"
 }
 
@@ -48,7 +61,7 @@ current_state() {
     index($0, e) { inside = 0; next }
     inside && /^[[:space:]]+iifname/ { live = 1 }
     END { print (live ? "on" : "off") }
-  ' "$LIVE_NFT"
+  ' <<<"$POLICY_BODY"
 }
 
 set_state() {
@@ -84,7 +97,7 @@ set_state() {
       print; next
     }
     { print }
-  ' "$LIVE_NFT" > "$tmp"
+  ' <<<"$POLICY_BODY" > "$tmp"
 
   tkoc_validate_nft "$tmp" privileged
   run_root_path "$LIVE_NFT" install -m 0600 -- "$tmp" "$LIVE_NFT"
@@ -109,10 +122,10 @@ main() {
   done
 
   case "$sub" in
-    on|enable)  require_policy; set_state on ;;
-    off|disable) require_policy; set_state off ;;
+    on|enable)  require_policy prompting; set_state on ;;
+    off|disable) require_policy prompting; set_state off ;;
     status|show)
-      require_policy
+      require_policy quiet
       printf '  guest network passthrough: %s\n' "$(current_state)"
       printf '  policy: %s\n' "$LIVE_NFT"
       ;;
