@@ -171,6 +171,49 @@ if TKOC_ALLOW_SSH=enabled bash "$PROJECT_ROOT/stages/40-hardening.sh" lockdown \
 fi
 ok "an ambient TKOC_ALLOW_SSH is refused at the lockdown tier"
 
+# ── an unreadable /etc/sysconfig/nftables.conf ──────────────────
+#
+# This is the exact failure that reached a real machine: that file is
+# 0600 root:root on Fedora, a plain grep/awk on it as an ordinary user fails
+# with "Permission denied", and under `set -e` the run died *after* installing
+# the policy and *before* wiring up the boot include or applying anything.
+
+rm -rf "$TKOC_TEST_ROOT"; mkdir -p "$TKOC_TEST_ROOT/etc/sysconfig"
+printf 'flush ruleset\ninclude "/etc/nftables/main.nft"\n' \
+  > "$TKOC_TEST_ROOT/etc/sysconfig/nftables.conf"
+chmod 000 "$TKOC_TEST_ROOT/etc/sysconfig/nftables.conf"
+
+if [[ -r "$TKOC_TEST_ROOT/etc/sysconfig/nftables.conf" ]]; then
+  # Running as root (or an fs that ignores modes) makes this case untestable.
+  printf 'skip - unreadable-file case needs a non-root user\n'
+else
+  bash "$PROJECT_ROOT/stages/40-hardening.sh" strong --dry-run --allow-unsupported \
+    > "$TEST_AREA/unreadable-dry.out" 2>&1 \
+    || { sed 's/^/    /' "$TEST_AREA/unreadable-dry.out" >&2
+         fail "a dry run aborted on an unreadable /etc/sysconfig/nftables.conf"; }
+  assert_grep 'contents are unknown' "$TEST_AREA/unreadable-dry.out" \
+    "the dry run did not say it could not read the file"
+  ok "a dry run survives an unreadable /etc/sysconfig/nftables.conf and says so"
+
+  # The real run must reach the end rather than dying half way. It cannot
+  # rewrite the file without privilege, so it is expected to fail -- but it
+  # must fail *loudly*, marking the snapshot and saying what to do.
+  chmod 000 "$TKOC_TEST_ROOT/etc/sysconfig/nftables.conf"
+  set +e
+  bash "$PROJECT_ROOT/stages/40-hardening.sh" strong --yes --allow-unsupported \
+    > "$TEST_AREA/unreadable-real.out" 2>&1
+  real_rc=$?
+  set -e
+  if (( real_rc != 0 )); then
+    assert_grep 'tkoc state restore' "$TEST_AREA/unreadable-real.out" \
+      "a failed run did not tell the user how to roll back"
+    ok "a run that cannot finish marks the snapshot and names the rollback command"
+  else
+    ok "the run completed despite the unreadable file"
+  fi
+fi
+chmod 644 "$TKOC_TEST_ROOT/etc/sysconfig/nftables.conf" 2>/dev/null || true
+
 # ── vm net toggles the staged policy ────────────────────────────
 
 stage_tier strong

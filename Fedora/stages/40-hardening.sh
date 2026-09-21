@@ -253,14 +253,42 @@ handle_firewalld() {
 
 RENDERED_NFT=""
 RENDERED_SYSCTL=""
+STAGE_COMPLETE=disabled
+
+# A single EXIT handler, installed before anything is rendered or written.
+#
+# Without this, a failure part way through left the recovery snapshot marked
+# "capturing" forever and said nothing about the machine being half-configured
+# -- which is exactly what happened when an unreadable
+# /etc/sysconfig/nftables.conf aborted the run after the policy was installed
+# but before it was applied.
+#
+# It deliberately does not roll back on its own. A policy file that has been
+# written but not loaded is inert, and an automatic undo that itself fails part
+# way is harder to reason about than a clear instruction.
+_hardening_exit() {
+  local rc=$?
+  [[ -n "$RENDERED_NFT" ]] && rm -f -- "$RENDERED_NFT"
+  [[ -n "$RENDERED_SYSCTL" ]] && rm -f -- "$RENDERED_SYSCTL"
+  if [[ "${OWNS_SNAPSHOT:-disabled}" == enabled && "$STAGE_COMPLETE" != enabled ]]; then
+    local id; id="$(_tkoc_basename "${TKOC_ACTIVE_SNAPSHOT:-}")"
+    tkoc_state_fail
+    warn ""
+    warn "This run stopped before it finished, so the machine may be part way"
+    warn "through a tier change. Nothing was undone automatically."
+    warn "Inspect and roll back with:"
+    warn "    tkoc state show $id"
+    warn "    tkoc state restore $id"
+  fi
+  return "$rc"
+}
+trap _hardening_exit EXIT
 
 render_policy() {
   local dns4="" ssh_source=""
 
   RENDERED_NFT="$(mktemp "${TMPDIR:-/tmp}/tkoc-nft.XXXXXX")"
   RENDERED_SYSCTL="$(mktemp "${TMPDIR:-/tmp}/tkoc-sysctl.XXXXXX")"
-  # shellcheck disable=SC2064
-  trap "rm -f -- '$RENDERED_NFT' '$RENDERED_SYSCTL'" EXIT
 
   tkoc_render_markers "$NFT_TEMPLATE" "$RENDERED_NFT" ${MARKERS[@]+"${MARKERS[@]}"}
   tkoc_render_markers "$SYSCTL_TEMPLATE" "$RENDERED_SYSCTL" ${MARKERS[@]+"${MARKERS[@]}"}
@@ -303,32 +331,53 @@ detect_lan_cidr() {
 # include block there is what makes the policy survive a reboot; rewriting the
 # whole file would discard include lines the operator added themselves.
 ensure_nft_include() {
-  local current tmp
-  if [[ -f "$NFT_SYSCONFIG" ]] \
-    && grep -Fq "$NFT_INCLUDE_BEGIN" "$NFT_SYSCONFIG"; then
-    current="$(sed -n "/$NFT_INCLUDE_BEGIN/,/$NFT_INCLUDE_END/p" "$NFT_SYSCONFIG")"
-    if grep -Fq 'include "/etc/nftables/tkoc.nft"' <<<"$current"; then
-      log "nftables.service already includes the tkoc policy"
-      return 0
+  local existing="" readable=yes tmp mode
+
+  if [[ -f "$NFT_SYSCONFIG" ]]; then
+    if existing="$(read_root_file "$NFT_SYSCONFIG")"; then
+      if grep -Fq 'include "/etc/nftables/tkoc.nft"' <<<"$existing" \
+        && grep -Fq "$NFT_INCLUDE_BEGIN" <<<"$existing"; then
+        log "nftables.service already includes the tkoc policy"
+        return 0
+      fi
+    else
+      # 0600 root:root is how Fedora ships this file, so an unprivileged dry
+      # run legitimately cannot see inside it. Say that, rather than silently
+      # assuming the include is absent and then reporting a change that may
+      # already be in place.
+      readable=no
+      existing=""
+      warn "cannot read $NFT_SYSCONFIG without privilege; its current contents are unknown"
     fi
   fi
 
   if tkoc_bool_enabled TKOC_DRY_RUN disabled; then
-    log "[dry-run] would add the tkoc include block to $NFT_SYSCONFIG"
+    if [[ "$readable" == no ]]; then
+      log "[dry-run] would ensure the tkoc include block in $NFT_SYSCONFIG"
+    else
+      log "[dry-run] would add the tkoc include block to $NFT_SYSCONFIG"
+    fi
     return 0
   fi
 
   tmp="$(mktemp "${TMPDIR:-/tmp}/tkoc-nftinc.XXXXXX")"
   if [[ -f "$NFT_SYSCONFIG" ]]; then
     tkoc_state_capture_file "$NFT_SYSCONFIG"
+    # Re-read under privilege now that this is a real run, so the rewrite is
+    # based on the actual contents rather than the empty string a failed
+    # unprivileged read produced.
+    existing="$(read_root_file "$NFT_SYSCONFIG")" \
+      || { rm -f -- "$tmp"; die "could not read $NFT_SYSCONFIG"; }
     # Drop any previous tkoc block, then append the current one.
-    awk -v b="$NFT_INCLUDE_BEGIN" -v e="$NFT_INCLUDE_END" '
+    printf '%s\n' "$existing" | awk -v b="$NFT_INCLUDE_BEGIN" -v e="$NFT_INCLUDE_END" '
       index($0, b) { skip = 1; next }
       index($0, e) { skip = 0; next }
       !skip { print }
-    ' "$NFT_SYSCONFIG" > "$tmp"
+    ' > "$tmp"
+    mode="$(existing_mode "$NFT_SYSCONFIG" 0600)"
   else
     : > "$tmp"
+    mode=0600
   fi
   {
     printf '%s\n' "$NFT_INCLUDE_BEGIN"
@@ -338,13 +387,13 @@ ensure_nft_include() {
   } >> "$tmp"
 
   run_root_path "$NFT_SYSCONFIG" mkdir -p -- "$(dirname -- "$NFT_SYSCONFIG")"
-  run_root_path "$NFT_SYSCONFIG" install -m 0600 -- "$tmp" "$NFT_SYSCONFIG"
+  run_root_path "$NFT_SYSCONFIG" install -m "$mode" -- "$tmp" "$NFT_SYSCONFIG"
   rm -f -- "$tmp"
   log "nftables.service will load the tkoc policy at boot"
 }
 
 install_policy() {
-  copy_file_root "$RENDERED_NFT" "$LIVE_NFT" 0600
+  copy_file_root "$RENDERED_NFT" "$LIVE_NFT" 0644
   copy_file_root "$RENDERED_SYSCTL" "$LIVE_SYSCTL" 0644
   ensure_nft_include
 }
@@ -408,6 +457,7 @@ main() {
   install_policy
   apply_policy
 
+  STAGE_COMPLETE=enabled
   if [[ "${OWNS_SNAPSHOT:-disabled}" == enabled ]]; then
     tkoc_state_finish
   fi

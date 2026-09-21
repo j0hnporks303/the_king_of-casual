@@ -571,6 +571,45 @@ copy_file() {
   log "Installed $target"
 }
 
+# Read a file that may be readable only by root, and say so rather than dying
+# when it is not.
+#
+# This exists because /etc/sysconfig/nftables.conf is mode 0600 root:root on
+# Fedora. Reading it with a plain grep or awk as your own user fails with
+# "Permission denied", and under `set -e` that killed the run *after* the
+# firewall policy had been installed but *before* the boot include was wired up
+# or the policy applied -- a half-configured machine, which is the worst place
+# to stop. Every read of a privileged path now goes through here.
+#
+# Returns 1 when the contents could not be read, so callers can degrade
+# deliberately instead of guessing. A dry run never prompts for a password: it
+# uses a cached credential if one exists and otherwise reports the contents as
+# unknown.
+read_root_file() {
+  local target="$1"
+  [[ -e "$target" ]] || return 1
+  if [[ -r "$target" ]]; then
+    cat -- "$target"
+    return 0
+  fi
+  # A test root is a user-owned sandbox; escalating inside one is never right.
+  [[ -n "${TKOC_TEST_ROOT:-}" ]] && return 1
+  [[ ${EUID:-$(id -u)} -eq 0 ]] && { cat -- "$target"; return 0; }
+  if tkoc_bool_enabled TKOC_DRY_RUN disabled; then
+    sudo -n cat -- "$target" 2>/dev/null || return 1
+  else
+    sudo cat -- "$target"
+  fi
+}
+
+# The mode a file already has, so rewriting it preserves the distribution's
+# choice instead of imposing ours.
+existing_mode() {
+  local target="$1" fallback="${2:-0644}" mode
+  mode="$(stat -c '%a' "$target" 2>/dev/null || stat -f '%Lp' "$target" 2>/dev/null || true)"
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] && printf '%s' "$mode" || printf '%s' "$fallback"
+}
+
 # ────────────────────────────────────────────────────────────────
 # SYSTEMD HELPERS
 # ────────────────────────────────────────────────────────────────

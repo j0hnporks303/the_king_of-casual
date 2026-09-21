@@ -30,7 +30,12 @@ HELP
 line() { printf '  %-34s %s\n' "$1" "$2"; }
 
 printf '\nInstalled policy\n'
-if [[ -r "$LIVE_NFT" ]]; then
+# "cannot read it" and "it is not there" are different answers, and reporting
+# the first as the second told people their firewall was not installed when it
+# was.
+if [[ -e "$LIVE_NFT" && ! -r "$LIVE_NFT" ]]; then
+  line "policy file" "$LIVE_NFT (not readable by you; try: sudo tkoc firewall status)"
+elif [[ -r "$LIVE_NFT" ]]; then
   line "policy file" "$LIVE_NFT"
   # Which tier a machine is on is readable from the policy itself: each tier
   # leaves its markers commented or live, so this needs no recorded state.
@@ -65,10 +70,20 @@ if command -v systemctl >/dev/null 2>&1; then
 else
   line "systemd" "unavailable"
 fi
-if [[ -r "${TKOC_TEST_ROOT:-}/etc/sysconfig/nftables.conf" ]]; then
-  grep -Fq 'include "/etc/nftables/tkoc.nft"' "${TKOC_TEST_ROOT:-}/etc/sysconfig/nftables.conf" \
-    && line "include wired up" "yes" || line "include wired up" "NO -- policy will not load at boot"
+_sysconfig="${TKOC_TEST_ROOT:-}/etc/sysconfig/nftables.conf"
+if [[ -e "$_sysconfig" ]]; then
+  # This file is 0600 root:root on Fedora, so an ordinary user cannot grep it.
+  if _contents="$(read_root_file "$_sysconfig")"; then
+    if grep -Fq 'include "/etc/nftables/tkoc.nft"' <<<"$_contents"; then
+      line "include wired up" "yes"
+    else
+      line "include wired up" "NO -- policy will not load at boot"
+    fi
+  else
+    line "include wired up" "unknown (needs privilege to read $_sysconfig)"
+  fi
 fi
+unset _sysconfig _contents
 
 printf '\nLive ruleset\n'
 if ! command -v nft >/dev/null 2>&1; then

@@ -107,18 +107,27 @@ if [[ -f "$LIVE_NFT" ]]; then
 else
   item "no firewall policy installed"
 fi
-if [[ -f "$NFT_SYSCONFIG" ]] && grep -Fq '# >>> tkoc >>>' "$NFT_SYSCONFIG"; then
+# 0600 root:root on Fedora: read it the way everything else does, or this
+# aborts the uninstall part way through with "Permission denied".
+_sysconf_body=""
+if [[ -f "$NFT_SYSCONFIG" ]] && _sysconf_body="$(read_root_file "$NFT_SYSCONFIG")" \
+  && grep -Fq '# >>> tkoc >>>' <<<"$_sysconf_body"; then
   item "remove the tkoc include from $NFT_SYSCONFIG"
   if [[ "$APPLY" == enabled ]]; then
     _tmp="$(mktemp "${TMPDIR:-/tmp}/tkoc-uninst.XXXXXX")"
-    awk '/# >>> tkoc >>>/ { skip=1; next } /# <<< tkoc <<</ { skip=0; next } !skip' \
-      "$NFT_SYSCONFIG" > "$_tmp"
-    run_root_path "$NFT_SYSCONFIG" install -m 0600 -- "$_tmp" "$NFT_SYSCONFIG"
+    printf '%s\n' "$_sysconf_body" \
+      | awk '/# >>> tkoc >>>/ { skip=1; next } /# <<< tkoc <<</ { skip=0; next } !skip' \
+      > "$_tmp"
+    run_root_path "$NFT_SYSCONFIG" install -m "$(existing_mode "$NFT_SYSCONFIG" 0600)" \
+      -- "$_tmp" "$NFT_SYSCONFIG"
     rm -f -- "$_tmp"; unset _tmp
   fi
+elif [[ -f "$NFT_SYSCONFIG" && -z "$_sysconf_body" ]]; then
+  item "cannot read $NFT_SYSCONFIG without privilege; re-run with sudo to clear the include"
 else
   item "no tkoc include in $NFT_SYSCONFIG"
 fi
+unset _sysconf_body
 if command -v systemctl >/dev/null 2>&1 \
   && [[ "$(systemctl is-enabled firewalld.service 2>/dev/null || true)" == masked* ]]; then
   item "firewalld is masked; unmask it"
