@@ -1,0 +1,401 @@
+<!-- ============================ PART V ============================ -->
+<section class="partdiv">
+  <div class="pnum">V</div>
+  <h1>The Traditional<br>Workflow</h1>
+  <div class="blurb">The classical dead-box toolchain, applied to APFS. This is the part that produces
+  the backbone of the examination: an inode-level inventory, a timeline, recovered deleted content, and
+  a set of hash-filtered leads. Everything exotic later in this manual is an addition to this, never a
+  replacement for it.</div>
+  <div class="toc-mini">
+    <div><span>17</span>The Sleuth Kit run, start to finish</div>
+    <div><span>18</span>Timelines — body files, mactime, super-timelines</div>
+    <div><span>19</span>Carving and unallocated space</div>
+    <div><span>20</span>Plaso, log2timeline and Timesketch</div>
+    <div><span>21</span>Hashing, known-file filtering and YARA sweeps</div>
+  </div>
+</section>
+
+<h2 id="c17"><span class="hn">17</span>The Sleuth Kit run</h2>
+
+<p>TSK addresses APFS through its pool abstraction. Every command needs two coordinates: the
+container's <b>sector offset</b> (<code>-o</code>, from <code>mmls</code>) and the volume's <b>APSB
+block</b> (<code>-B</code>, from <code>pstat</code>). Establish both once and reuse them.</p>
+
+<pre class="sh"><i># set up shell variables and never type the offsets again</i>
+<b>IMG=/evidence/mbp-001.dd</b>
+<b>OFF=1024040</b>          <i># container start sector, from mmls</i>
+<b>SYS=1102</b>             <i># System volume APSB block, from pstat</i>
+<b>DAT=1276</b>             <i># Data volume APSB block</i></pre>
+
+<h3>17.1 Volume statistics</h3>
+
+<pre class="sh"><b>fsstat -o $OFF -B $DAT $IMG</b>
+FILE SYSTEM INFORMATION
+--------------------------------------------
+File System Type: APFS
+Volume Name: Macintosh HD - Data
+Volume UUID: 3E9A...
+Capacity: 494384795648 bytes
+Reserved: ...
+Case Sensitive: No
+Encrypted: Yes
+Formatted By: hfs_convert (1412.101.1)
+Created: 2023-09-14 11:02:41
+Next Object ID: 2214877
+Number of Files: 1874221
+Number of Directories: 402118</pre>
+
+<p><b>Next Object ID</b> is worth writing down. It is the high-water mark of inode allocation and the
+anchor for the anomaly detection in <a href="#c43">§43</a>.</p>
+
+<h3>17.2 Listing the tree</h3>
+
+<pre class="sh"><i># recursive listing with full paths; deleted entries are marked with *</i>
+<b>fls -o $OFF -B $DAT -r -p $IMG | head</b>
+d/d 2:	private
+d/d 3:	Users
+r/r 1024:	Users/jdoe/.zsh_history
+<s>-/r * 8871:	Users/jdoe/Downloads/installer.pkg</s>      &lt;-- deleted
+
+<i># deleted entries only — the fastest lead generator on the whole image</i>
+<b>fls -o $OFF -B $DAT -r -p -d $IMG &gt; ~/cases/001/06-analysis/deleted-entries.txt</b>
+<b>wc -l &lt; ~/cases/001/06-analysis/deleted-entries.txt</b>
+3412</pre>
+
+<div class="cal note"><span class="ct">● NOTE — DELETED-ENTRY RECOVERY IS WEAKER ON APFS</span>
+<p>On NTFS or ext4, <code>fls -d</code> reliably finds unlinked entries because the metadata sits in a
+fixed table that is reused lazily. APFS removes records from a B-tree instead, so what
+<code>fls -d</code> surfaces is a much thinner and less predictable set. <b>Do not conclude a file was
+never present because <code>fls -d</code> did not list it.</b> The productive routes to deleted
+content on APFS are snapshots (<a href="#c42">§42</a>) and checkpoints (<a href="#c41">§41</a>), in
+that order.</p></div>
+
+<h3>17.3 Inode detail and extraction</h3>
+
+<pre class="sh"><i># everything TSK knows about one inode, including the extent list</i>
+<b>istat -o $OFF -B $DAT $IMG 8871</b>
+Inode: 8871
+Allocated: No
+UID / GID: 501 / 20
+Mode: rrw-r--r--
+Size: 4823104
+Created:  2026-07-21 19:04:11.492103000 (UTC)
+Modified: 2026-07-21 19:04:16.881204000 (UTC)
+Changed:  2026-07-30 02:41:55.003001000 (UTC)
+Accessed: 2026-07-21 19:05:02.110448000 (UTC)
+Direct Blocks:
+884213 884214 884215 ...
+
+<i># extract the content by inode</i>
+<b>icat -o $OFF -B $DAT $IMG 8871 &gt; ~/cases/001/03-extract/recovered/installer.pkg</b>
+<b>file ~/cases/001/03-extract/recovered/installer.pkg</b>
+xar archive version 1
+
+<i># bulk export of everything, allocated and unallocated</i>
+<b>tsk_recover -o $OFF -B $DAT -e $IMG ~/cases/001/03-extract/tsk-all/</b></pre>
+
+<div class="cal tip"><span class="ct">▸ TIP — READ THAT istat OUTPUT AGAIN</span>
+<p>Created, Modified and Accessed all cluster around 2026-07-21. <b>Changed</b> is nine days later,
+with the file already deleted. That is the timestomp signature from <a href="#c14">§14.1</a> appearing
+in real output. The metadata was altered long after the file was written — and someone bothered to do
+that to a file they then deleted.</p></div>
+
+<h2 id="c18"><span class="hn">18</span>Timelines</h2>
+
+<h3>18.1 Body files and mactime</h3>
+
+<pre class="sh"><i># generate a body file for each volume, tagging the source in the path</i>
+<b>fls -o $OFF -B $SYS -r -m "/sys" $IMG &gt;  ~/cases/001/04-timeline/body.txt</b>
+<b>fls -o $OFF -B $DAT -r -m "/data" $IMG &gt;&gt; ~/cases/001/04-timeline/body.txt</b>
+
+<i># render to a timeline — always pin the timezone explicitly</i>
+<b>mactime -b ~/cases/001/04-timeline/body.txt -d -z UTC \
+    &gt; ~/cases/001/04-timeline/fs-timeline.csv</b>
+
+<i># narrow to a window of interest</i>
+<b>mactime -b ~/cases/001/04-timeline/body.txt -d -z UTC 2026-07-20..2026-08-01 \
+    &gt; ~/cases/001/04-timeline/fs-window.csv</b></pre>
+
+<div class="cal caution"><span class="ct">■ CAUTION — ALWAYS <code>-z UTC</code></span>
+<p><code>mactime</code> renders in the local timezone of the analysis box unless told otherwise. If
+your workstation drifts from UTC, or you move the case between machines, you will silently produce two
+timelines that disagree. Set the workstation to UTC (<a href="#c3">§3.4</a>), pass <code>-z UTC</code>
+anyway, and state the timezone on every timeline exhibit.</p></div>
+
+<h3>18.2 Reading a body file directly</h3>
+
+<p>The format is pipe-delimited and trivially greppable, which is often faster than loading a
+timeline viewer:</p>
+
+<pre class="dia">MD5|name|inode|mode|UID|GID|size|atime|mtime|ctime|crtime</pre>
+
+<pre class="sh"><i># everything created within a two-hour window, sorted</i>
+<b>awk -F'|' '$11 &gt; 1753000000 &amp;&amp; $11 &lt; 1753007200 {print strftime("%F %T",$11), $2}' \
+    ~/cases/001/04-timeline/body.txt | sort</b>
+
+<i># files whose ctime is more than 24h after their mtime — timestomp candidates</i>
+<b>awk -F'|' '$10 &gt; $9 + 86400 {print strftime("%F %T",$9), strftime("%F %T",$10), $2}' \
+    ~/cases/001/04-timeline/body.txt | sort | head -50</b></pre>
+
+<h3>18.3 Super-timelines</h3>
+
+<p>A filesystem timeline alone is thin. The value comes from merging it with the artifact timelines
+from Part VII — unified logs, FSEvents, quarantine events, knowledgeC — into one ordered narrative.
+That merge is what plaso does (<a href="#c20">§20</a>), and it is where an examination usually turns
+from a pile of facts into a sequence of events.</p>
+
+<h2 id="c19"><span class="hn">19</span>Carving and unallocated space</h2>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — CARVING IS THE WRONG FIRST INSTINCT ON APFS</span>
+<p>Header/footer carving assumes files are contiguous. APFS, being copy-on-write with aggressive
+fragmentation, routinely scatters a file across dozens of extents in no useful order. Carvers will
+produce thousands of truncated, corrupt, or interleaved fragments and you will spend days triaging
+noise.</p>
+<p>Order of preference for recovering deleted content on APFS:</p>
+<ol>
+<li><b>Snapshots</b> (<a href="#c42">§42</a>) — full files, full metadata, full paths</li>
+<li><b>Checkpoint reconstruction</b> (<a href="#c41">§41</a>) — same, for states no snapshot covers</li>
+<li><b>Extent-aware recovery</b> — <code>tsk_recover</code>, <code>icat</code> by inode</li>
+<li><b>Carving</b> — last, and mainly for small self-contained formats: JPEG, PNG, PDF, SQLite pages</li>
+</ol></div>
+
+<h3>19.1 When you do carve</h3>
+
+<pre class="sh"><i># PhotoRec is the most capable general carver; run it unattended against the image</i>
+<b>photorec /d ~/cases/001/05-carve/photorec /cmd $IMG partition_none,fileopt,everything,enable,search</b>
+
+<i># foremost for a targeted set — fast and predictable</i>
+<b>foremost -t jpg,png,pdf,doc,zip,sqlite -i $IMG -o ~/cases/001/05-carve/foremost</b>
+
+<i># scalpel when you need custom signatures (edit /etc/scalpel/scalpel.conf first)</i>
+<b>scalpel -c /etc/scalpel/scalpel.conf -o ~/cases/001/05-carve/scalpel $IMG</b></pre>
+
+<h3>19.2 bulk_extractor — the one that earns its runtime</h3>
+
+<p>Unlike a carver, <code>bulk_extractor</code> ignores filesystem structure entirely and scans for
+<em>features</em>: email addresses, URLs, domains, credit-card numbers, phone numbers, JSON, PII, and
+crucially <b>it decompresses and recurses</b>. It finds content inside compressed streams, inside swap,
+inside unallocated space, and inside fragments no carver would reassemble.</p>
+
+<pre class="sh"><b>bulk_extractor -o ~/cases/001/05-carve/bulk -e all -S ssn_mode=1 $IMG</b>
+
+<i># the outputs worth reading first</i>
+<b>ls ~/cases/001/05-carve/bulk/</b>
+url.txt  url_histogram.txt  email.txt  email_histogram.txt  domain.txt
+telephone.txt  ccn.txt  json.txt  windirs.txt  zip.txt  report.xml
+
+<i># the histograms are the point — ranked, deduplicated, immediately readable</i>
+<b>head -30 ~/cases/001/05-carve/bulk/url_histogram.txt</b></pre>
+
+<div class="cal tip"><span class="ct">▸ TIP — RUN IT AGAINST THE ENCRYPTED IMAGE TOO</span>
+<p>Run <code>bulk_extractor</code> against the raw image <em>as well as</em> the decrypted mount. The
+raw image includes the unencrypted volumes — Preboot, Recovery, VM — and any region the FUSE mount
+does not expose. It costs one long unattended run and occasionally surfaces material nothing else
+does.</p></div>
+
+<h3>19.3 The unallocated-space problem</h3>
+
+<pre class="sh"><i># the classical approach — which you should expect to work poorly here</i>
+<b>blkls -o $OFF -B $DAT $IMG &gt; ~/cases/001/05-carve/unalloc.raw</b></pre>
+
+<p>TSK's notion of "unallocated" maps badly onto a copy-on-write filesystem with a space-manager
+bitmap, and against an encrypted volume it cannot work at all. The reliable route is to read the
+space manager's allocation bitmap directly and extract the unreferenced blocks yourself —
+<a href="#c45">§45</a>.</p>
+
+<h2 id="c20"><span class="hn">20</span>Plaso, log2timeline and Timesketch</h2>
+
+<p>Plaso parses filesystem metadata <em>and</em> several hundred artifact formats into one normalised
+timeline. On APFS it reaches the filesystem through dfVFS on top of libfsapfs — the library you built
+in <a href="#c7">§7.3</a>.</p>
+
+<pre class="sh"><b>python3 -m pip install --user plaso</b>
+
+<i># full run over the image; supply the FileVault credential so it can read Data</i>
+<b>log2timeline.py --storage_file ~/cases/001/04-timeline/plaso.db \
+    --partitions all --volumes all \
+    --credential password:'TheUserPassword' \
+    --hashers sha256 \
+    $IMG</b>
+
+<i># filter to a window and export</i>
+<b>psort.py -o dynamic -w ~/cases/001/04-timeline/super-timeline.csv \
+    ~/cases/001/04-timeline/plaso.db \
+    "date &gt; '2026-07-20 00:00:00' AND date &lt; '2026-08-01 00:00:00'"</b>
+
+<i># what did it actually parse? always check before trusting completeness</i>
+<b>pinfo.py ~/cases/001/04-timeline/plaso.db | head -60</b></pre>
+
+<div class="cal caution"><span class="ct">■ CAUTION — CONFIRM THE CREDENTIAL SYNTAX AND THAT IT WORKED</span>
+<p>Plaso's credential flag has changed form across releases. Run
+<code>log2timeline.py --help | grep -A3 credential</code> against your installed version rather than
+copying syntax from any guide, this one included. Then verify positively with <code>pinfo.py</code>
+that events were extracted from the Data volume. A run that silently failed to decrypt still produces
+a plausible-looking storage file — populated entirely from the unencrypted volumes.</p></div>
+
+<div class="cal tip"><span class="ct">▸ TIP — TIMESKETCH FOR ANYTHING NON-TRIVIAL</span>
+<p>A CSV of four million timeline events is not analysable in a spreadsheet. Timesketch gives you
+search, tagging, saved views, and multiple timelines overlaid on one axis — which is exactly the shape
+of the correlation work in <a href="#c53">§53</a>. It runs in Docker on the Parrot box.</p>
+<pre class="sh"><b>git clone https://github.com/google/timesketch.git ~/tools/timesketch</b>
+<b>cd ~/tools/timesketch &amp;&amp; docker compose up -d</b>
+<b>psort.py -o timesketch --name "case-001-fs" ~/cases/001/04-timeline/plaso.db</b></pre></div>
+
+<h2 id="c21"><span class="hn">21</span>Hashing, known-file filtering and YARA</h2>
+
+<h3>21.1 Reduce the haystack</h3>
+
+<p>A macOS install contains well over a million files, almost all of them Apple's. Filtering known-good
+content is the difference between a tractable examination and an impossible one.</p>
+
+<pre class="sh"><i># hash everything on the mounted volumes</i>
+<b>hashdeep -c sha256 -r /mnt/data/apfs5 &gt; ~/cases/001/01-image/data-volume.hashes</b>
+
+<i># build a TSK hash database from an NSRL set and index it</i>
+<b>hfind -i nsrl-sha1 /opt/nsrl/NSRLFile.txt</b>
+<b>hfind /opt/nsrl/NSRLFile.txt 8a5f...c21b</b>
+8a5f...c21b	Microsoft Word</pre>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — THE SEALED VOLUME IS ITS OWN HASH SET</span>
+<p>You do not need NSRL to filter Apple's own files. The sealed System volume carries a
+<code>FILE_INFO</code> record — a SHA-256 — for <b>every file it contains</b>, placed there by Apple.
+That is a complete, authoritative, locally available known-good set for the entire OS, already on your
+image. Extract those hashes (<a href="#c46">§46</a>) and use them as your filter. It is more accurate
+than any external hash set, because it is version-exact for this specific machine.</p></div>
+
+<h3>21.2 YARA across the mount</h3>
+
+<pre class="sh"><b class="r">apt install -y yara</b>
+<b>git clone https://github.com/Yara-Rules/rules.git ~/tools/yara-rules</b>
+
+<i># scan the user data, following nothing, reporting matched strings</i>
+<b>yara -r -s -w ~/tools/yara-rules/index.yar /mnt/data/apfs5/Users/ \
+    2&gt; /dev/null | tee ~/cases/001/06-analysis/yara-users.txt</b>
+
+<i># macOS-specific rule sets are far higher signal than generic ones</i>
+<b>git clone https://github.com/objective-see/Malware.git ~/tools/objsee-samples</b></pre>
+
+<div class="cal tip"><span class="ct">▸ TIP — SCAN THE SNAPSHOTS, NOT JUST THE PRESENT</span>
+<p>Mount each snapshot (<a href="#c42">§42</a>) and run the same YARA sweep across it. Malware deleted
+before acquisition is frequently still present, intact, inside a snapshot from a few hours earlier —
+and a YARA hit inside a snapshot is a far stronger finding than a carved fragment, because it comes
+with a path, a timestamp and an inode.</p></div>
+
+<!-- ============================ PART VI ============================ -->
+<section class="partdiv">
+  <div class="pnum">VI</div>
+  <h1>Parrot's Arsenal</h1>
+  <div class="blurb">What is already on the box, what has to be added, and which tool to reach for
+  when. Parrot ships a strong general forensics stack; what it does not ship — and cannot, because
+  Debian does not package them — is everything macOS-specific. This is the gap list.</div>
+  <div class="toc-mini">
+    <div><span>22</span>What ships in Parrot, what you must add</div>
+    <div><span>23</span>The toolset, category by category</div>
+  </div>
+</section>
+
+<h2 id="c22"><span class="hn">22</span>What ships, what you must add</h2>
+
+<p>Parrot's Security and Forensics editions carry most of the classical stack in the default
+metapackages. Confirm what you actually have rather than assuming:</p>
+
+<pre class="sh"><i># what forensics packages are installed right now</i>
+<b>apt list --installed 2&gt;/dev/null | grep -Ei \
+    'sleuth|tsk|ewf|aff|foremost|scalpel|photorec|testdisk|bulk|binwalk|yara|volatility|hashdeep'</b>
+
+<i># Parrot's forensics metapackage, if you are on a minimal install</i>
+<b class="r">apt install -y parrot-tools-forensics</b></pre>
+
+<div class="wrap">
+<table class="tight">
+<thead><tr><th style="width:22%">Area</th><th style="width:38%">Ships with Parrot</th><th>Must be added</th></tr></thead>
+<tbody>
+<tr><td>Imaging</td><td><code>dd</code>, <code>dc3dd</code>, <code>dcfldd</code>, <code>ddrescue</code>, <code>guymager</code>, <code>ewf-tools</code>, <code>afflib-tools</code></td><td>—</td></tr>
+<tr><td><b>APFS access</b></td><td><s>nothing</s></td><td><b><code>apfs-fuse</code>, <code>libfsapfs</code>, <code>linux-apfs-oot</code>, <code>apfsprogs</code></b></td></tr>
+<tr><td>Filesystem analysis</td><td><code>sleuthkit</code>, <code>autopsy</code></td><td>Newer TSK from source if <code>pstat</code> is missing</td></tr>
+<tr><td>Carving</td><td><code>foremost</code>, <code>scalpel</code>, <code>testdisk</code>/<code>photorec</code>, <code>magicrescue</code>, <code>binwalk</code>, <code>bulk-extractor</code></td><td>—</td></tr>
+<tr><td>Timeline</td><td><code>mactime</code> (with TSK)</td><td><code>plaso</code>, <code>timesketch</code></td></tr>
+<tr><td><b>macOS artifacts</b></td><td><s>nothing</s></td><td><b><code>mac_apt</code>, <code>APOLLO</code>, unified-log parsers, <code>FSEventsParser</code>, <code>spotlight_parser</code>, <code>chainbreaker</code></b></td></tr>
+<tr><td>SQLite</td><td><code>sqlite3</code>, <code>sqlitebrowser</code></td><td><code>undark</code>, <code>walitean</code>, <code>sqlparse</code>, <code>bring2lite</code></td></tr>
+<tr><td>Plists</td><td><code>libplist-utils</code> (<code>plistutil</code>)</td><td><code>ccl_bplist</code>, <code>nska_deserialize</code></td></tr>
+<tr><td>Malware triage</td><td><code>yara</code>, <code>radare2</code>, <code>clamav</code>, <code>exiftool</code></td><td><code>LIEF</code>, <code>capa</code>, <code>ghidra</code></td></tr>
+<tr><td>Memory</td><td><code>volatility3</code> (edition-dependent)</td><td>macOS symbol tables — and see <a href="#c59">§59</a></td></tr>
+<tr><td>Network</td><td><code>wireshark</code>, <code>tcpflow</code>, <code>tshark</code>, <code>networkminer</code></td><td>—</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="cal note"><span class="ct">● NOTE — THE PATTERN</span>
+<p>Everything generic is packaged; everything macOS-specific is not. That is not an oversight in
+Parrot — the macOS DFIR ecosystem is largely Python on GitHub, moves fast, and is not packaged
+anywhere. Plan on a <code>~/tools</code> directory of git clones and a Python virtualenv, and plan on
+recording commit hashes (<a href="#c5">§5.4</a>).</p></div>
+
+<h2 id="c23"><span class="hn">23</span>The toolset, category by category</h2>
+
+<h3>23.1 Set up an isolated Python environment first</h3>
+
+<p>Most of what follows is Python, some of it with conflicting dependencies. Do not install it into
+the system interpreter on a machine you rely on.</p>
+
+<pre class="sh"><b>python3 -m venv ~/tools/venv-dfir</b>
+<b>source ~/tools/venv-dfir/bin/activate</b>
+<b>pip install --upgrade pip wheel</b>
+
+<i># the core set — details on each below</i>
+<b>pip install plaso pytsk3 pyewf construct lief capstone \
+    biplist ccl-bplist nska-deserialize pandas python-dateutil</b></pre>
+
+<h3>23.2 The macOS artifact parsers</h3>
+
+<table>
+<thead><tr><th style="width:24%">Tool</th><th style="width:20%">Source</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><b>mac_apt</b></td><td><code>ydkhatri/mac_apt</code></td><td>The closest thing to an all-in-one macOS artifact suite. Runs on Linux, reads images directly, ~40 plugins covering most of Part VII. Start here. <a href="#c60">§60</a></td></tr>
+<tr><td><b>macos-UnifiedLogs</b></td><td><code>mandiant/macos-UnifiedLogs</code></td><td>Rust parser for <code>.tracev3</code>. The only reliable way to read unified logs off-Mac. <a href="#c24">§24</a></td></tr>
+<tr><td><b>UnifiedLogReader</b></td><td><code>ydkhatri/UnifiedLogReader</code></td><td>Python alternative; slower, sometimes handles files the Rust parser rejects</td></tr>
+<tr><td><b>FSEventsParser</b></td><td><code>dlcowen/FSEventsParser</code></td><td>Decodes <code>/.fseventsd</code> gzipped event streams. <a href="#c25">§25</a></td></tr>
+<tr><td><b>spotlight_parser</b></td><td><code>ydkhatri/spotlight_parser</code></td><td>Parses <code>store.db</code> metadata — filenames and attributes for files long deleted. <a href="#c26">§26</a></td></tr>
+<tr><td><b>APOLLO</b></td><td><code>mac4n6/APOLLO</code></td><td>Pattern-of-life correlation over knowledgeC, powerlog, CoreDuet and friends. <a href="#c61">§61</a></td></tr>
+<tr><td><b>chainbreaker</b></td><td><code>n0fate/chainbreaker</code></td><td>Keychain extraction. <a href="#c56">§56</a></td></tr>
+<tr><td><b>nska_deserialize</b></td><td>PyPI</td><td>Turns NSKeyedArchiver plists into readable structures — needed constantly. <a href="#c33">§33</a></td></tr>
+</tbody>
+</table>
+
+<pre class="sh"><i># clone the parser set in one go</i>
+<b>mkdir -p ~/tools &amp;&amp; cd ~/tools</b>
+<b>for r in ydkhatri/mac_apt mandiant/macos-UnifiedLogs dlcowen/FSEventsParser \
+         ydkhatri/spotlight_parser mac4n6/APOLLO n0fate/chainbreaker; do
+    git clone --depth 1 "https://github.com/$r.git"
+  done</b>
+
+<i># the Mandiant parser is Rust — build it once</i>
+<b>cd ~/tools/macos-UnifiedLogs &amp;&amp; cargo build --release --examples</b></pre>
+
+<h3>23.3 SQLite forensics tools</h3>
+
+<table>
+<thead><tr><th style="width:24%">Tool</th><th>Use</th></tr></thead>
+<tbody>
+<tr><td><code>sqlite3</code></td><td>Queries, plus <code>.recover</code> which rebuilds from damaged or partially-freed pages</td></tr>
+<tr><td><b><code>undark</code></b></td><td>Extracts deleted rows from freelist and unallocated page space</td></tr>
+<tr><td><b><code>walitean</code></b></td><td>Recovers records from <code>-wal</code> write-ahead logs — frequently holds the newest, uncommitted activity</td></tr>
+<tr><td><code>sqlparse</code> <span class="small">(mdegrazia)</span></td><td>Parses journal and WAL files into readable records</td></tr>
+<tr><td><code>bring2lite</code></td><td>Research-grade deleted-record recovery; slow, thorough</td></tr>
+<tr><td><code>sqlitebrowser</code></td><td>Fast interactive exploration when you do not yet know the schema</td></tr>
+</tbody>
+</table>
+
+<h3>23.4 Binary and Mach-O triage</h3>
+
+<table>
+<thead><tr><th style="width:24%">Tool</th><th>Use on Mach-O without Apple tooling</th></tr></thead>
+<tbody>
+<tr><td><b><code>LIEF</code></b></td><td>Python: parse Mach-O headers, load commands, entitlements, embedded code-signature blobs. The workhorse. <a href="#c57">§57</a></td></tr>
+<tr><td><code>radare2</code> / <code>rizin</code></td><td>Disassembly, strings, cross-references, symbol listing</td></tr>
+<tr><td><code>ghidra</code></td><td>Full decompilation when triage is not enough</td></tr>
+<tr><td><code>capa</code></td><td>Maps binary capabilities to ATT&amp;CK — fast triage verdicts</td></tr>
+<tr><td><code>exiftool</code></td><td>Metadata from documents and images; reads bundle plists too</td></tr>
+<tr><td><code>ent</code> / <code>binwalk -E</code></td><td>Entropy measurement — packed and encrypted content. <a href="#c58">§58</a></td></tr>
+</tbody>
+</table>

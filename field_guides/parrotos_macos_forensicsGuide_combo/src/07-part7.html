@@ -1,0 +1,461 @@
+<!-- ============================ PART VII ============================ -->
+<section class="partdiv">
+  <div class="pnum">VII</div>
+  <h1>The Artifact Hunt</h1>
+  <div class="blurb">macOS records an extraordinary amount about itself, in a dozen formats, in places
+  chosen apparently at random. This part is the map. Every path is given as macOS sees it and as it
+  appears on your Linux mount, because on Ventura those are never the same thing.</div>
+  <div class="toc-mini">
+    <div><span>24</span>The unified log — .tracev3 and uuidtext</div>
+    <div><span>25</span>FSEvents — the filesystem's own diary</div>
+    <div><span>26</span>Spotlight metadata stores</div>
+    <div><span>27</span>Quarantine and download provenance</div>
+    <div><span>28</span>Pattern of life — knowledgeC, powerlog, CoreDuet</div>
+    <div><span>29</span>TCC — the permission ledger</div>
+    <div><span>30</span>Notifications, installs and BSM audit logs</div>
+    <div><span>31</span>Browsers, Messages, Mail and user data</div>
+    <div><span>32</span>SQLite deep dive — WAL, freelist, unallocated</div>
+    <div><span>33</span>Plists and NSKeyedArchiver without plutil</div>
+  </div>
+</section>
+
+<h2 id="c24"><span class="hn">24</span>The unified log</h2>
+
+<p>Since Sierra, almost everything the system says about itself goes into the unified log: process
+launches, network state, authentication, mounts, USB attachment, sandbox violations, TCC decisions.
+It is the richest single artifact on the machine and the most annoying to read off-Mac.</p>
+
+<div class="kv">
+<b>Log data</b><span><code>/private/var/db/diagnostics/</code> → <code>&lt;DATA&gt;/private/var/db/diagnostics/</code></span>
+<b>String tables</b><span><code>/private/var/db/uuidtext/</code> → <code>&lt;DATA&gt;/private/var/db/uuidtext/</code></span>
+</div>
+
+<pre class="dia"><b>diagnostics/</b>
+├── Persist/        0000000000000001.tracev3   long-lived records — <u>your main source</u>
+├── Special/        short-lived, higher-volume records
+├── Signpost/       performance instrumentation
+├── HighVolume/     very chatty subsystems
+├── logdata.LiveData.tracev3    the in-flight buffer at shutdown/acquisition
+└── Persist/...
+<b>uuidtext/</b>
+├── XX/YYYYYYYY...  per-binary format-string tables
+└── dsc/            shared cache string tables</pre>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — THE LOG IS USELESS WITHOUT uuidtext</span>
+<p><code>.tracev3</code> files do not contain log messages. They contain <em>format string references
+and arguments</em>; the actual text lives in <code>uuidtext/</code>, keyed by the UUID of the binary
+that emitted it. Copy only <code>diagnostics/</code> and you get a parse full of
+<code>&lt;missing format string&gt;</code>. <b>Always extract both directories together</b>, preserving
+their relative layout. This single mistake accounts for most "the unified log parser doesn't work"
+complaints.</p></div>
+
+<h3>24.1 Extract and parse</h3>
+
+<pre class="sh"><i># extract both trees, preserving structure and timestamps</i>
+<b>mkdir -p ~/cases/001/03-extract/logs</b>
+<b>cp -a /mnt/data/apfs5/private/var/db/diagnostics ~/cases/001/03-extract/logs/</b>
+<b>cp -a /mnt/data/apfs5/private/var/db/uuidtext    ~/cases/001/03-extract/logs/</b>
+
+<i># Mandiant's Rust parser — fastest and most complete</i>
+<b>~/tools/macos-UnifiedLogs/target/release/examples/unifiedlog_parser \
+    -i ~/cases/001/03-extract/logs -o ~/cases/001/04-timeline/unifiedlog.csv</b>
+
+<b>wc -l ~/cases/001/04-timeline/unifiedlog.csv</b>
+14882301 unifiedlog.csv</pre>
+
+<h3>24.2 What to look for in fifteen million lines</h3>
+
+<table>
+<thead><tr><th style="width:26%">Signal</th><th>Grep for</th></tr></thead>
+<tbody>
+<tr><td>Process execution</td><td><code>xpcproxy</code>, <code>execve</code>, <code>launchd.*spawn</code>, <code>Sandbox</code></td></tr>
+<tr><td>launchd job loads</td><td><code>com.apple.xpc.launchd</code>, <code>service state</code>, the label of the suspect job</td></tr>
+<tr><td>USB / external media</td><td><code>IOUSBHostDevice</code>, <code>USBMSC</code>, <code>diskarbitrationd</code>, <code>mount</code></td></tr>
+<tr><td>Authentication</td><td><code>opendirectoryd</code>, <code>authorization</code>, <code>SecurityAgent</code>, <code>sudo</code></td></tr>
+<tr><td>TCC decisions</td><td><code>tccd</code>, <code>TCCAccessRequest</code>, <code>kTCCService</code></td></tr>
+<tr><td>Gatekeeper / notarisation</td><td><code>syspolicyd</code>, <code>XProtect</code>, <code>notarization</code>, <code>assessment</code></td></tr>
+<tr><td>Network changes</td><td><code>configd</code>, <code>SCNetwork</code>, <code>en0</code>, VPN interface names</td></tr>
+<tr><td>Screen sharing / remote</td><td><code>screensharingd</code>, <code>ARDAgent</code>, <code>sshd</code></td></tr>
+<tr><td><b>Clock changes</b></td><td><code>settimeofday</code>, <code>timed</code>, <code>ntpd</code> — see <a href="#c53">§53</a></td></tr>
+</tbody>
+</table>
+
+<pre class="sh"><i># process launches in a window, as a first pass</i>
+<b>awk -F',' '$1 &gt; "2026-07-30 00:00" &amp;&amp; $1 &lt; "2026-07-31 00:00"' \
+    ~/cases/001/04-timeline/unifiedlog.csv | grep -i 'xpcproxy\|execve' | head -50</b>
+
+<i># every time the system clock was set — anti-forensics indicator</i>
+<b>grep -iE 'settimeofday|time (change|jump)|adjusting local clock' \
+    ~/cases/001/04-timeline/unifiedlog.csv</b></pre>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — GAPS ARE THE FINDING</span>
+<p>Unified log files rotate and are pruned automatically, so absence alone proves nothing. But
+<code>.tracev3</code> files carry sequential identifiers, and the record stream is continuous. A
+<b>missing file in the sequence</b>, or a clean multi-hour hole in an otherwise chatty log with no
+corresponding shutdown record, is not normal pruning. <a href="#c54">§54</a> covers how to distinguish
+rotation from deletion.</p></div>
+
+<h2 id="c25"><span class="hn">25</span>FSEvents</h2>
+
+<p>Every APFS volume keeps a low-level record of filesystem changes in <code>/.fseventsd/</code> at
+its root. It is coarse — it records that a path changed and roughly how, not who or exactly when — but
+it reaches back weeks or months and it records <b>paths that no longer exist</b>.</p>
+
+<div class="kv">
+<b>Location</b><span><code>&lt;DATA&gt;/.fseventsd/</code> and on <em>every other volume too</em></span>
+<b>Format</b><span>gzip-compressed binary streams, named with hex event IDs; plus <code>fseventsd-uuid</code></span>
+</div>
+
+<pre class="sh"><b>ls /mnt/data/apfs5/.fseventsd/ | head</b>
+0000000000a1b2c3
+0000000000a1b2d4
+fseventsd-uuid
+
+<b>cp -a /mnt/data/apfs5/.fseventsd ~/cases/001/03-extract/logs/</b>
+
+<b>python3 ~/tools/FSEventsParser/FSEParser_V4.1.py \
+    -c case001 -s ~/cases/001/03-extract/logs/.fseventsd \
+    -o ~/cases/001/04-timeline/fsevents/</b>
+
+<i># the output is per-path with change-type flags</i>
+<b>grep -i 'Downloads' ~/cases/001/04-timeline/fsevents/*.tsv | head</b></pre>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — FSEVENTS REMEMBERS DELETED FILES BY NAME</span>
+<p>An FSEvents record persists long after the file it describes is gone. You will routinely find
+entries for files that exist nowhere on the volume, in no snapshot, and in no carved output — proving
+that a file with that exact path <em>existed</em> and was created, modified, renamed or removed. For
+establishing that a tool was present on the machine before being wiped, this is often the only
+surviving evidence. It carries no content, but "a file named
+<code>Users/jdoe/Library/LaunchAgents/com.apple.softwareupdated.plist</code> was created and later
+removed" is frequently the whole point.</p>
+<p>Check <code>/.fseventsd</code> on <b>every</b> volume, not just Data. And note that the presence of
+a <code>fseventsd-uuid</code> that differs from the one in your snapshots means the volume's event
+history was reset — which happens on erase, and on deliberate deletion of the directory.</p></div>
+
+<h2 id="c26"><span class="hn">26</span>Spotlight metadata stores</h2>
+
+<p>Spotlight indexes far more than filenames — it stores per-file metadata attributes, including
+where a file was downloaded from, its content type, its title, and in many cases a text preview.
+Crucially, index entries can survive the file itself.</p>
+
+<div class="kv">
+<b>Volume store</b><span><code>&lt;DATA&gt;/.Spotlight-V100/Store-V2/&lt;UUID&gt;/store.db</code> and <code>.store.db</code></span>
+<b>Also present on</b><span>every mounted volume, including external drives that were attached</span>
+<b>User store</b><span><code>&lt;DATA&gt;/private/var/folders/&lt;xx&gt;/&lt;yyy&gt;/0/com.apple.Spotlight/</code></span>
+</div>
+
+<pre class="sh"><b>find /mnt/data/apfs5/.Spotlight-V100 -name 'store.db' -o -name '.store.db'</b>
+
+<b>python3 ~/tools/spotlight_parser/spotlight_parser.py \
+    /mnt/data/apfs5/.Spotlight-V100/Store-V2/3E9A.../store.db \
+    ~/cases/001/06-analysis/spotlight/</b>
+
+<i># the attribute that matters most: download provenance, retained per file</i>
+<b>grep -i 'kMDItemWhereFroms\|kMDItemDownloadedDate' \
+    ~/cases/001/06-analysis/spotlight/*.txt | head -40</b></pre>
+
+<div class="cal tip"><span class="ct">▸ TIP — EXTERNAL DRIVE STORES ARE A HISTORY OF OTHER MACHINES</span>
+<p>If any external volume was indexed on this Mac, its <code>.Spotlight-V100</code> travelled with it.
+Conversely, if the subject attached a drive that had been indexed elsewhere, its store may describe
+files from a completely different computer. Always check which volume UUID a store belongs to before
+attributing its contents to this machine.</p></div>
+
+<h2 id="c27"><span class="hn">27</span>Quarantine and download provenance</h2>
+
+<p>Three independent records of where a file came from. They disagree often enough that you should
+collect all three.</p>
+
+<h3>27.1 The quarantine database</h3>
+
+<pre class="sh"><i># ~/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2</i>
+<b>Q=/mnt/data/apfs5/Users/jdoe/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2</b>
+<b>cp -a "$Q"* ~/cases/001/03-extract/db/</b>
+
+<b>sqlite3 ~/cases/001/03-extract/db/com.apple.LaunchServices.QuarantineEventsV2 \
+  "SELECT datetime(LSQuarantineTimeStamp + 978307200, 'unixepoch') AS ts,
+          LSQuarantineAgentName, LSQuarantineDataURLString, LSQuarantineOriginURLString
+   FROM LSQuarantineEvent ORDER BY ts DESC LIMIT 40;"</b>
+2026-07-21 19:03:58|Safari|https://cdn.example.net/installer.pkg|https://example.net/download</pre>
+
+<div class="cal note"><span class="ct">● NOTE — THE 978307200 CONSTANT</span>
+<p>Apple timestamps in these databases are <b>Mac absolute time</b>: seconds since 2001-01-01 UTC. Add
+<code>978307200</code> to convert to Unix epoch. You will type this number constantly — see
+<a href="#apxC">Appendix C</a>. Getting it wrong shifts every timestamp by 31 years, which is at
+least obvious. Forgetting that <em>some</em> tables use Unix epoch and others use Mac absolute in the
+same database is the subtler trap.</p></div>
+
+<h3>27.2 The quarantine extended attribute</h3>
+
+<pre class="sh"><i># the xattr rides on the file itself and survives copying within the volume</i>
+<b>getfattr -n com.apple.quarantine -d /mnt/data/apfs5/Users/jdoe/Downloads/installer.pkg</b>
+com.apple.quarantine="0083;68d3f1a6;Safari;F1E2D3C4-..."
+<i>#  flags ; hex mac-absolute timestamp ; agent ; event UUID (joins to the DB above)</i>
+
+<i># sweep the whole user tree for quarantined files, including ones the DB forgot</i>
+<b>getfattr -R -n com.apple.quarantine /mnt/data/apfs5/Users/ 2&gt;/dev/null | \
+    grep -B1 'com.apple.quarantine' | head -60</b></pre>
+
+<h3>27.3 The where-from attribute</h3>
+
+<pre class="sh"><i># com.apple.metadata:kMDItemWhereFroms is a binary plist inside an xattr</i>
+<b>getfattr -n com.apple.metadata:kMDItemWhereFroms --only-values \
+    /mnt/data/apfs5/Users/jdoe/Downloads/installer.pkg &gt; /tmp/wf.bplist</b>
+<b>plistutil -i /tmp/wf.bplist -o -</b>
+&lt;array&gt;
+  &lt;string&gt;https://cdn.example.net/installer.pkg&lt;/string&gt;
+  &lt;string&gt;https://example.net/download&lt;/string&gt;
+&lt;/array&gt;</pre>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — ABSENCE OF QUARANTINE IS ITSELF A SIGNAL</span>
+<p>Anything downloaded by a normal browser gets quarantined. A recently-created executable or
+application bundle in a user directory with <b>no</b> quarantine xattr arrived by a route that does not
+set it: <code>curl</code>, <code>wget</code>, <code>scp</code>, AirDrop in some configurations, a
+package installer running as root, extraction from an archive by a non-quarantine-aware tool, or
+deliberate removal with <code>xattr -d</code>. On a machine whose user only ever installs things from
+the browser, an unquarantined binary in <code>~/Downloads</code> is worth more attention than a
+quarantined one.</p></div>
+
+<h2 id="c28"><span class="hn">28</span>Pattern of life — knowledgeC, powerlog, CoreDuet</h2>
+
+<p>Apple's on-device analytics record application usage, focus, device state and activity at a
+granularity that surprises people. These databases answer "what was the user actually doing at
+14:32" better than anything else on the machine.</p>
+
+<table>
+<thead><tr><th style="width:34%">Artifact</th><th>Path (Data-volume relative)</th></tr></thead>
+<tbody>
+<tr><td><b>knowledgeC (system)</b></td><td><code>private/var/db/CoreDuet/Knowledge/knowledgeC.db</code></td></tr>
+<tr><td><b>knowledgeC (user)</b></td><td><code>Users/&lt;u&gt;/Library/Application Support/Knowledge/knowledgeC.db</code></td></tr>
+<tr><td>interactionC</td><td><code>private/var/db/CoreDuet/People/interactionC.db</code></td></tr>
+<tr><td><b>Powerlog</b></td><td><code>private/var/db/powerlog/Library/BatteryLife/CurrentPowerlog.PLSQL</code></td></tr>
+<tr><td>Powerlog archives</td><td><code>private/var/db/powerlog/Library/BatteryLife/Archives/</code></td></tr>
+<tr><td>Screen Time</td><td><code>Users/&lt;u&gt;/Library/Application Support/Knowledge/</code></td></tr>
+</tbody>
+</table>
+
+<pre class="sh"><i># application usage with durations, from knowledgeC</i>
+<b>sqlite3 knowledgeC.db "
+SELECT datetime(ZOBJECT.ZSTARTDATE + 978307200,'unixepoch') AS start,
+       datetime(ZOBJECT.ZENDDATE   + 978307200,'unixepoch') AS end,
+       ZOBJECT.ZVALUESTRING AS app,
+       (ZOBJECT.ZENDDATE - ZOBJECT.ZSTARTDATE) AS seconds
+FROM ZOBJECT
+WHERE ZSTREAMNAME = '/app/inFocus'
+ORDER BY start DESC LIMIT 50;"</b>
+2026-07-30 02:38:11|2026-07-30 02:44:02|com.apple.Terminal|351</pre>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — POWERLOG OUTLIVES THE APPLICATION</span>
+<p>Powerlog records per-process energy and activity for weeks, and <b>it keeps recording bundle
+identifiers for applications that have since been deleted</b>. An application installed, run once and
+removed leaves no bundle, no Launch Services entry, and often no log — but it leaves a powerlog row.
+Combined with knowledgeC's focus intervals you can reconstruct that an unknown binary ran, for how
+long, and when, from an artifact almost nobody wipes.</p>
+<pre class="sh"><b>sqlite3 CurrentPowerlog.PLSQL ".tables" | tr ' ' '\n' | grep -i 'app\|process' | head</b></pre></div>
+
+<div class="cal tip"><span class="ct">▸ TIP — USE APOLLO RATHER THAN HAND-WRITTEN SQL</span>
+<p>APOLLO ships hundreds of vetted queries across these databases and normalises the output into one
+timeline. Writing your own SQL is for when you need something APOLLO does not have. <a href="#c61">§61</a>.</p></div>
+
+<h2 id="c29"><span class="hn">29</span>TCC — the permission ledger</h2>
+
+<p>Transparency, Consent and Control records every privacy permission ever granted or denied: camera,
+microphone, screen recording, full disk access, accessibility, automation. For an intrusion case it is
+close to a list of what the attacker wanted.</p>
+
+<div class="kv">
+<b>System</b><span><code>&lt;DATA&gt;/Library/Application Support/com.apple.TCC/TCC.db</code></span>
+<b>Per user</b><span><code>&lt;DATA&gt;/Users/&lt;u&gt;/Library/Application Support/com.apple.TCC/TCC.db</code></span>
+</div>
+
+<pre class="sh"><b>sqlite3 TCC.db "
+SELECT service, client, client_type, auth_value, auth_reason,
+       datetime(last_modified,'unixepoch') AS modified
+FROM access ORDER BY last_modified DESC;"</b>
+kTCCServiceScreenCapture|com.example.updater|0|2|3|2026-07-30 02:39:44
+kTCCServiceAccessibility|com.example.updater|0|2|3|2026-07-30 02:39:51</pre>
+
+<table class="tight">
+<thead><tr><th style="width:30%">Service</th><th>Why an attacker wants it</th></tr></thead>
+<tbody>
+<tr><td><code>kTCCServiceAccessibility</code></td><td>Synthetic input and full UI control — the single most abused permission on macOS</td></tr>
+<tr><td><code>kTCCServiceScreenCapture</code></td><td>Screen recording</td></tr>
+<tr><td><code>kTCCServiceSystemPolicyAllFiles</code></td><td>Full Disk Access — reads every user file including other apps' databases</td></tr>
+<tr><td><code>kTCCServiceMicrophone</code> / <code>Camera</code></td><td>Surveillance</td></tr>
+<tr><td><code>kTCCServiceAppleEvents</code></td><td>Driving other applications via automation</td></tr>
+<tr><td><code>kTCCServiceSystemPolicyDesktopFolder</code> etc</td><td>Targeted access to Desktop, Documents, Downloads</td></tr>
+</tbody>
+</table>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — TCC IS A TIMELINE OF INTENT</span>
+<p><code>last_modified</code> tells you when each grant happened, and grants cluster: a user
+installing a legitimate screen-sharing tool produces two or three related entries within a minute. An
+unfamiliar bundle identifier acquiring Accessibility <em>and</em> Screen Recording <em>and</em> Full
+Disk Access inside the same thirty seconds is a compromise timestamp accurate to the second.</p>
+<p>Cross-reference every <code>client</code> value against the bundles actually present on disk. A TCC
+entry naming a bundle that no longer exists means the application was removed after being granted
+access — and the entry survived the cleanup.</p></div>
+
+<h2 id="c30"><span class="hn">30</span>Notifications, installs and audit logs</h2>
+
+<h3>30.1 Notification Center</h3>
+
+<p>Holds delivered notification content — message previews, mail subjects, alerts — often including
+text from applications whose own databases were cleared.</p>
+
+<pre class="sh"><b>find /mnt/data/apfs5/private/var/folders -path '*com.apple.notificationcenter/db2/db' 2&gt;/dev/null</b>
+<b>sqlite3 db "SELECT datetime(delivered_date+978307200,'unixepoch'), app_id, data
+             FROM record ORDER BY delivered_date DESC LIMIT 30;"</b>
+<i># the 'data' column is an NSKeyedArchiver blob — see §33</i></pre>
+
+<h3>30.2 install.log</h3>
+
+<p>Plain text, long-retained, and it records every package installation, OS update and — importantly —
+every <code>installer</code> invocation regardless of source.</p>
+
+<pre class="sh"><b>grep -iE 'installer|package|Install(ed|ing)' \
+    /mnt/data/apfs5/private/var/log/install.log | tail -100</b>
+
+<i># rotated copies go back much further than people expect</i>
+<b>ls -la /mnt/data/apfs5/private/var/log/install.log*</b>
+<b>zgrep -i 'pkg' /mnt/data/apfs5/private/var/log/install.log.*.gz | tail -50</b></pre>
+
+<h3>30.3 OpenBSM audit logs</h3>
+
+<p>The BSM audit trail is the closest thing macOS has to Linux auditd. It is <b>off by default on
+recent macOS</b>, but where it was enabled — managed fleets, hardened builds — it is authoritative
+process-execution evidence.</p>
+
+<pre class="sh"><b>ls /mnt/data/apfs5/private/var/audit/ | tail</b>
+20260730024155.20260730031200
+20260730031200.not_terminated
+
+<i># Debian has no praudit. Parse with mac_apt's plugin, or with Python:</i>
+<b>python3 ~/tools/mac_apt/mac_apt.py -o ~/cases/001/06-analysis/macapt \
+    MOUNTED /mnt/data/apfs5 BASICINFO</b></pre>
+
+<div class="cal note"><span class="ct">● NOTE — CHECK WHETHER AUDITING WAS EVEN ON</span>
+<p>Read <code>&lt;DATA&gt;/private/etc/security/audit_control</code> before drawing conclusions from an
+empty <code>/var/audit</code>. If auditing was disabled the absence means nothing. If it was enabled
+and the directory is empty or truncated, that is a different and much more interesting fact.</p></div>
+
+<h2 id="c31"><span class="hn">31</span>Browsers, Messages, Mail and user data</h2>
+
+<div class="wrap">
+<table class="tight">
+<thead><tr><th style="width:20%">Artifact</th><th style="width:44%">Path (Data-volume relative)</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td>Safari history</td><td><code>Users/&lt;u&gt;/Library/Safari/History.db</code></td><td>Mac absolute time; check <code>-wal</code></td></tr>
+<tr><td>Safari downloads</td><td><code>Users/&lt;u&gt;/Library/Safari/Downloads.plist</code></td><td>bplist; includes in-progress and removed items</td></tr>
+<tr><td>Safari session</td><td><code>Users/&lt;u&gt;/Library/Safari/LastSession.plist</code></td><td>Tabs open at last quit — often very revealing</td></tr>
+<tr><td>Safari (sandboxed)</td><td><code>Users/&lt;u&gt;/Library/Containers/com.apple.Safari/Data/Library/Safari/</code></td><td><span class="tag">13+</span> some files moved into the container</td></tr>
+<tr><td>Chrome</td><td><code>Users/&lt;u&gt;/Library/Application Support/Google/Chrome/Default/History</code></td><td>WebKit epoch (1601, µs)</td></tr>
+<tr><td>Firefox</td><td><code>Users/&lt;u&gt;/Library/Application Support/Firefox/Profiles/*/places.sqlite</code></td><td>Unix µs</td></tr>
+<tr><td>Messages</td><td><code>Users/&lt;u&gt;/Library/Messages/chat.db</code></td><td>Plus <code>Attachments/</code> and a large <code>-wal</code></td></tr>
+<tr><td>Mail</td><td><code>Users/&lt;u&gt;/Library/Mail/V10/</code></td><td><span class="tag">13+</span> V10; <code>Envelope Index</code> is SQLite</td></tr>
+<tr><td>Photos</td><td><code>Users/&lt;u&gt;/Pictures/Photos Library.photoslibrary/database/Photos.sqlite</code></td><td>Retains records for deleted assets</td></tr>
+<tr><td>Recent items</td><td><code>Users/&lt;u&gt;/Library/Application Support/com.apple.sharedfilelist/*.sfl2</code></td><td>NSKeyedArchiver; recent docs, apps, servers</td></tr>
+<tr><td>Shell history</td><td><code>Users/&lt;u&gt;/.zsh_history</code>, <code>.bash_history</code></td><td>First thing to read on any intrusion case</td></tr>
+<tr><td>SSH</td><td><code>Users/&lt;u&gt;/.ssh/known_hosts</code>, <code>config</code>, <code>authorized_keys</code></td><td>Where they went, and who can get in</td></tr>
+<tr><td>Folder state</td><td><code>.DS_Store</code> throughout</td><td>Records filenames that were once in a folder</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — .DS_Store REMEMBERS WHAT WAS IN THE FOLDER</span>
+<p><code>.DS_Store</code> stores per-folder Finder state keyed by filename. Delete a file and its entry
+frequently remains. A <code>.DS_Store</code> in a directory that is now empty can enumerate exactly
+what used to be there, complete with names. Parse them with <code>python3 -m ds_store</code> or
+<code>mac_apt</code>, and do it across the whole volume rather than one directory at a time.</p></div>
+
+<h2 id="c32"><span class="hn">32</span>SQLite deep dive</h2>
+
+<p>Nearly every artifact above is SQLite. Treating those files as "run a SELECT and move on" throws
+away most of the available evidence.</p>
+
+<h3>32.1 Always take the whole set</h3>
+
+<pre class="sh"><i># NEVER copy just the .db</i>
+<b>cp -a chat.db chat.db-wal chat.db-shm ~/cases/001/03-extract/db/</b></pre>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — THE NEWEST DATA IS IN THE -wal, NOT THE DATABASE</span>
+<p>In WAL mode — which macOS uses almost everywhere — committed transactions live in the
+<code>-wal</code> file until a checkpoint folds them into the main database. On a machine that was
+imaged without a clean shutdown, <b>the most recent hours of activity exist only in the
+<code>-wal</code></b>. Copy the <code>.db</code> alone and you silently lose the very period you most
+care about.</p>
+<p>Worse: opening the database with <code>sqlite3</code> while the <code>-wal</code> is present causes
+an automatic checkpoint, <em>modifying your copy</em>. Work on copies, and hash before and after.</p></div>
+
+<h3>32.2 Reading the WAL separately</h3>
+
+<pre class="sh"><i># see what the WAL holds before it is merged</i>
+<b>python3 ~/tools/walitean/walitean.py -f chat.db-wal -o ~/cases/001/06-analysis/wal/</b>
+
+<i># or force a read-only open that will not checkpoint</i>
+<b>sqlite3 "file:chat.db?immutable=1" "PRAGMA journal_mode; SELECT count(*) FROM message;"</b></pre>
+
+<h3>32.3 Deleted rows</h3>
+
+<pre class="sh"><i># sqlite's own recovery — rebuilds from pages, including some freed content</i>
+<b>sqlite3 chat.db ".recover" &gt; recovered.sql</b>
+<b>sqlite3 recovered.db &lt; recovered.sql</b>
+
+<i># undark walks freelist and unallocated page space for deleted records</i>
+<b>undark -i chat.db --freespace &gt; deleted-rows.txt</b>
+
+<i># crude but effective: strings across the raw database file</i>
+<b>strings -a -t d chat.db | grep -i 'suspicious-term'</b></pre>
+
+<div class="cal tip"><span class="ct">▸ TIP — CHECK auto_vacuum BEFORE YOU INVEST TIME</span>
+<p><code>PRAGMA auto_vacuum;</code> returning <code>1</code> (FULL) means freed pages are returned to
+the OS immediately and deleted-row recovery will yield little. Returning <code>0</code> (NONE) means
+freed pages linger and recovery is worth the effort. One query saves an afternoon.</p></div>
+
+<h2 id="c33"><span class="hn">33</span>Plists and NSKeyedArchiver without plutil</h2>
+
+<p>Property lists come in three flavours: XML, binary (bplist), and binary containing an
+NSKeyedArchiver object graph. The third looks like nonsense until deserialised, and a great deal of
+modern macOS state is stored that way.</p>
+
+<h3>33.1 XML and binary plists</h3>
+
+<pre class="sh"><i># Debian's libplist-utils replaces plutil for straightforward cases</i>
+<b>plistutil -i com.apple.dock.plist -o - | head -40</b>
+
+<i># Python handles both formats natively and is easier to script</i>
+<b>python3 -c "
+import plistlib,sys,json
+d=plistlib.load(open(sys.argv[1],'rb'))
+print(json.dumps(d,indent=2,default=str))" com.apple.dock.plist</b></pre>
+
+<h3>33.2 NSKeyedArchiver</h3>
+
+<p>Recognise it by a top-level <code>$archiver</code>, <code>$objects</code>, <code>$top</code>
+structure. <code>plistlib</code> will parse it and hand you an unusable flat object table; you need a
+deserialiser to rebuild the graph.</p>
+
+<pre class="sh"><b>pip install nska-deserialize</b>
+<b>python3 - &lt;&lt;'PY'
+import nska_deserialize as nd, sys, json
+with open('/path/to/com.apple.LSSharedFileList.RecentDocuments.sfl2','rb') as f:
+    obj = nd.deserialize_plist(f)
+print(json.dumps(obj, indent=2, default=str))
+PY</b></pre>
+
+<table class="tight">
+<thead><tr><th style="width:44%">Artifact</th><th>Why it is NSKeyedArchiver</th></tr></thead>
+<tbody>
+<tr><td><code>*.sfl2</code> shared file lists</td><td>Recent documents, applications, servers, mounted volumes</td></tr>
+<tr><td><code>BackgroundItems-v*.btm</code></td><td>The modern login-item store — <a href="#c35">§35</a></td></tr>
+<tr><td>Notification Center <code>record.data</code></td><td>Notification content</td></tr>
+<tr><td><code>com.apple.finder.plist</code> recents</td><td>Finder state</td></tr>
+<tr><td>Many <code>Library/Preferences</code> values</td><td>Anything storing a custom object</td></tr>
+</tbody>
+</table>
+
+<div class="cal caution"><span class="ct">■ CAUTION — PLIST TIMESTAMPS ARE MAC ABSOLUTE</span>
+<p><code>plistlib</code> returns real <code>datetime</code> objects for XML plist dates and handles
+them correctly. But a raw numeric timestamp stored <em>inside</em> a plist value — which is how most
+Apple code stores time — is almost always Mac absolute (2001 epoch) and needs
+<code>+978307200</code>. If a date comes out in 1988, you forgot. If it comes out in 2058, you added
+it twice.</p></div>

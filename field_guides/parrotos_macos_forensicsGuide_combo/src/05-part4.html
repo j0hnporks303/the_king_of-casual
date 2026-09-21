@@ -1,0 +1,423 @@
+<!-- ============================ PART IV ============================ -->
+<section class="partdiv">
+  <div class="pnum">IV</div>
+  <h1>APFS Internals<br>That Matter</h1>
+  <div class="blurb">Not a specification walkthrough. This is the subset of APFS structure that
+  changes what you conclude: where old states of the filesystem survive, why a deleted file may still
+  be fully intact, which timestamp moved and why, and why the path you think you are looking at is
+  not the path macOS was using.</div>
+  <div class="toc-mini">
+    <div><span>11</span>Container anatomy — NXSB, checkpoints, transaction IDs</div>
+    <div><span>12</span>Volumes, roles, firmlinks and the System/Data split</div>
+    <div><span>13</span>The catalog B-tree and its record types</div>
+    <div><span>14</span>Time in APFS — four timestamps and what moves them</div>
+    <div><span>15</span>Clones, snapshots, tombstones and copy-on-write</div>
+    <div><span>16</span>Sealed System Volume and cryptexes</div>
+  </div>
+</section>
+
+<h2 id="c11"><span class="hn">11</span>Container anatomy</h2>
+
+<h3>11.1 Every object carries its own provenance</h3>
+
+<p>APFS objects begin with a 32-byte <code>obj_phys</code> header. Four of its fields are directly
+useful to you:</p>
+
+<div class="kv">
+<b>o_cksum</b><span>Fletcher-64 over the rest of the block. A block whose checksum fails is either corrupt or forged — and you can test this yourself, which matters in <a href="#c54">§54</a>.</span>
+<b>o_oid</b><span>Object identifier. For virtual objects this is looked up through the object map.</span>
+<b>o_xid</b><span><b>Transaction identifier.</b> The single most under-used forensic field in APFS. Monotonically increasing, per container, for the life of the filesystem.</span>
+<b>o_type / o_subtype</b><span>What the object is, and what a B-tree contains.</span>
+</div>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — THE XID IS A CLOCK NOBODY CAN BACKDATE</span>
+<p>Timestamps are file metadata and are trivially rewritten. The XID is not: it is assigned by the
+filesystem when a transaction commits, always increases, and is not exposed through any API an
+attacker can reach. This gives you an <b>independent, monotonic ordering of every write the filesystem
+ever made</b> — one that cannot be forged without rewriting the container wholesale.</p>
+<p>A file claiming a creation date of 2019 sitting in a structure with an XID adjacent to files written
+last Tuesday is a backdated file. This is the foundation of <a href="#c43">§43</a> and it is the most
+reliable anti-timestomping technique available on this filesystem.</p></div>
+
+<h3>11.2 The container superblock and the checkpoint areas</h3>
+
+<pre class="dia">block 0        <b>nx_superblock</b> ('NXSB')  ── may be stale; it is a hint, not the truth
+                 │
+                 ├─ nx_xp_desc_base / nx_xp_desc_blocks ──▶ <b>checkpoint descriptor area</b>
+                 │      a ring buffer of past checkpoints. Each entry:
+                 │        · checkpoint-map blocks ('CXB')
+                 │        · <u>a full copy of the container superblock at that time</u>
+                 │
+                 ├─ nx_xp_data_base / nx_xp_data_blocks ──▶ <b>checkpoint data area</b>
+                 │      the ephemeral objects (space manager, reaper) for each checkpoint
+                 │
+                 ├─ nx_omap_oid    ──▶ container object map
+                 ├─ nx_fs_oid[]    ──▶ up to 100 volume superblocks (APSB)
+                 └─ nx_keylocker   ──▶ container keybag  (see <a href="#c9">§9</a>)</pre>
+
+<p>Mounting picks the superblock in the descriptor area with the <b>highest XID and a valid
+checksum</b>. Block 0 is only a starting point.</p>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — THE DESCRIPTOR AREA IS A TIME MACHINE</span>
+<p>The descriptor ring holds <em>superseded container superblocks</em> — complete, self-consistent
+snapshots of the filesystem's root structure as it existed at earlier transactions. Because APFS is
+copy-on-write, the object trees those old superblocks point at are frequently <b>still on disk and
+still intact</b>, simply no longer referenced by the current state.</p>
+<p>This means you can often mount, or at least walk, the filesystem <em>as it was several checkpoints
+ago</em> — recovering files deleted after the last snapshot but before the present. No snapshot
+required, no Time Machine required. Almost no tooling does this automatically. <a href="#c41">§41</a>
+is entirely about doing it by hand.</p></div>
+
+<pre class="sh"><i># find every container superblock in the image by magic, not just the one at block 0</i>
+<b>xxd -c 32 /evidence/mbp-001.dd | grep -i 'NXSB' | head -40</b>
+
+<i># cleaner: scan block-aligned offsets for the NXSB magic at offset 0x20 of the block</i>
+<b>python3 - &lt;&lt;'PY'
+import sys
+BS=4096; MAGIC=b'NXSB'
+with open('/evidence/mbp-001.dd','rb') as f:
+    f.seek(524308480)                      # container start
+    for blk in range(0, 4096):             # descriptor area is early in the container
+        d = f.read(BS)
+        if not d: break
+        if d[32:36] == MAGIC:
+            xid = int.from_bytes(d[16:24],'little')
+            print(f"block {blk:6d}  xid {xid}")
+PY</b>
+block      0  xid 214417
+block    193  xid 214414
+block    194  xid 214415
+block    195  xid 214416
+block    196  xid <u>214417</u>      &lt;-- newest valid checkpoint
+</pre>
+
+<h3>11.3 The object map</h3>
+
+<p>APFS separates <em>virtual</em> object IDs from physical block addresses. The object map (omap) is
+a B-tree keyed on <code>(oid, xid)</code> that resolves an object ID to the block holding its content
+<b>as of a given transaction</b>.</p>
+
+<p>That <code>xid</code> in the key is the mechanism behind snapshots: the same object ID resolves to
+different physical blocks depending on which transaction you ask about. Ask for an old XID and you get
+the old data — if it has not been reclaimed.</p>
+
+<h3>11.4 The space manager</h3>
+
+<p>Tracks free and allocated blocks via allocation bitmaps. Forensically it answers one question that
+matters enormously: <b>which blocks are currently unreferenced?</b> Unreferenced blocks on a
+copy-on-write filesystem are where superseded versions of files live. <a href="#c45">§45</a> covers
+extracting them.</p>
+
+<h2 id="c12"><span class="hn">12</span>Volumes, roles, firmlinks and the System/Data split</h2>
+
+<h3>12.1 The volume superblock records who built it</h3>
+
+<p>Each volume's <code>apfs_superblock</code> ('APSB') carries two fields that are pure forensic
+value and are almost never mentioned:</p>
+
+<div class="kv">
+<b>apfs_formatted_by</b><span>The macOS build string that <em>created</em> this volume, plus a timestamp and the XID at the time. Tells you when the machine was set up or last erased.</span>
+<b>apfs_modified_by[8]</b><span>A rolling list of the <b>last eight OS builds that mounted this volume writable</b>, each with a timestamp and XID.</span>
+</div>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — apfs_modified_by IS AN OS-LEVEL ACCESS LOG</span>
+<p>Eight entries, each naming a specific macOS build and when it touched the volume. Read it and you
+learn the machine's update history — and, far more interestingly, <b>whether the volume was ever
+mounted by a different system than the one installed on it</b>. A recoveryOS build, an installer
+build, or an OS version that was never installed on this Mac appearing in that list means the disk was
+mounted somewhere else. That is evidence of exactly the kind of offline tampering the rest of your
+examination struggles to see.</p>
+<p>Your own acquisition may appear here too — recoveryOS mounting the volume. Check the timestamps
+against your acquisition record before drawing conclusions.</p>
+<pre class="sh"><b>fsapfsinfo -o 524308480 -p 'PW' -f 5 /evidence/mbp-001.dd | \
+    grep -A3 -i 'formatted by\|modified by'</b></pre></div>
+
+<h3>12.2 Volume roles</h3>
+
+<table class="tight">
+<thead><tr><th style="width:20%">Role</th><th style="width:12%">Value</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td>NONE</td><td>0x0000</td><td>Plain data volume; also what a manually created volume gets</td></tr>
+<tr><td>SYSTEM</td><td>0x0001</td><td>Sealed OS volume <span class="tag">13+</span></td></tr>
+<tr><td>USER</td><td>0x0002</td><td>Legacy home-directory role</td></tr>
+<tr><td>RECOVERY</td><td>0x0004</td><td>recoveryOS</td></tr>
+<tr><td>VM</td><td>0x0008</td><td>Swap and hibernation — see <a href="#c50">§50</a></td></tr>
+<tr><td>PREBOOT</td><td>0x0010</td><td>Boot support, LocalPolicy — see <a href="#c49">§49</a></td></tr>
+<tr><td>INSTALLER</td><td>0x0020</td><td>Present during OS installation; lingering ones are interesting</td></tr>
+<tr><td>DATA</td><td>0x0040</td><td>The Data volume — everything you care about</td></tr>
+<tr><td>BACKUP</td><td>0x0100</td><td>Time Machine local destination</td></tr>
+<tr><td>UPDATE / XART / HARDWARE</td><td>varies</td><td>Firmware and secure-storage roles; rarely relevant, always worth noting if unexpected</td></tr>
+</tbody>
+</table>
+
+<div class="cal note"><span class="ct">● NOTE — AN EXTRA VOLUME IS ALWAYS WORTH A LOOK</span>
+<p>The standard layout is five volumes. A sixth with role NONE is not inherently suspicious — people
+create volumes for legitimate reasons — but it is unusual enough that it should never go
+unexamined. An attacker who wants storage that survives a user wiping their home directory, and that
+most triage tools will not enumerate, can simply add a volume to the container.</p></div>
+
+<h3>12.3 Firmlinks — why your paths are wrong</h3>
+
+<p>Since Catalina the OS is split across two volumes that macOS presents as one tree. The System
+volume is read-only and sealed; everything writable lives on the Data volume, mounted at
+<code>/System/Volumes/Data</code>. <b>Firmlinks</b> are the bidirectional bindings that make the split
+invisible: they are neither symlinks nor hard links, and they exist only in APFS.</p>
+
+<p>The mapping lives on the System volume in <code>/usr/share/firmlinks</code>:</p>
+
+<pre class="sh"><b>cat /mnt/apfs/apfs1/usr/share/firmlinks</b>
+/AppleInternal          AppleInternal
+/Applications           Applications
+/Library                Library
+/System/Library/Caches  System/Library/Caches
+/System/Library/Assets  System/Library/Assets
+/System/Library/Speech  System/Library/Speech
+/Users                  Users
+/Volumes                Volumes
+/cores                  cores
+/opt                    opt
+/private/tmp            private/tmp
+/private/var            private/var
+/usr/local              usr/local
+/usr/libexec/cups       usr/libexec/cups
+/usr/share/snmp         usr/share/snmp</pre>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — TRANSLATE EVERY PATH YOU READ IN A GUIDE</span>
+<p>Every macOS forensics reference — including the artifact tables in Part VII — writes paths the way
+the running system sees them: <code>/var/log/install.log</code>,
+<code>/Library/LaunchDaemons/</code>. <b>None of those paths exist on the volume you mounted.</b>
+They are firmlinked. On your Linux mount they resolve as:</p>
+<table class="tight">
+<thead><tr><th style="width:42%">Path as macOS shows it</th><th>Where it actually is</th></tr></thead>
+<tbody>
+<tr><td><code>/var/log/install.log</code></td><td><code>&lt;DATA&gt;/private/var/log/install.log</code></td></tr>
+<tr><td><code>/Library/LaunchDaemons/</code></td><td><code>&lt;DATA&gt;/Library/LaunchDaemons/</code></td></tr>
+<tr><td><code>/Users/jdoe/</code></td><td><code>&lt;DATA&gt;/Users/jdoe/</code></td></tr>
+<tr><td><code>/Applications/</code></td><td><code>&lt;DATA&gt;/Applications/</code></td></tr>
+<tr><td><code>/System/Library/LaunchDaemons/</code></td><td><code>&lt;SYS&gt;/System/Library/LaunchDaemons/</code></td></tr>
+<tr><td><code>/usr/bin/</code>, <code>/bin/</code>, <code>/sbin/</code></td><td><code>&lt;SYS&gt;/usr/bin/</code> etc — sealed, read-only</td></tr>
+<tr><td><code>/usr/local/</code></td><td><code>&lt;DATA&gt;/usr/local/</code> — <b>writable, and therefore interesting</b></td></tr>
+<tr><td><code>/private/tmp/</code></td><td><code>&lt;DATA&gt;/private/tmp/</code></td></tr>
+</tbody>
+</table>
+<p>The rule of thumb: <b>if it is writable, it is on Data.</b> <code>/usr/local</code> is the one that
+catches people out — it looks like a system path, it sits inside a sealed volume's namespace, and it
+is fully writable because it is firmlinked to Data. It is a favourite persistence location for
+exactly that reason.</p></div>
+
+<h3>12.4 Mounting both halves at once</h3>
+
+<pre class="sh"><i># mount System and Data separately, then reason about them together</i>
+<b class="r">mkdir -p /mnt/sys /mnt/data</b>
+<b>fsapfsmount -o 524308480 -f 1 /evidence/mbp-001.dd /mnt/sys</b>
+<b>fsapfsmount -o 524308480 -f 5 -p 'PW' /evidence/mbp-001.dd /mnt/data</b>
+
+<i># a crude but effective reconstruction of the unified view, read-only</i>
+<b class="r">mkdir -p /mnt/macos &amp;&amp; mount --bind /mnt/sys/apfs1 /mnt/macos</b>
+<b class="r">mount --bind /mnt/data/apfs5/Users   /mnt/macos/Users</b>
+<b class="r">mount --bind /mnt/data/apfs5/Library /mnt/macos/Library</b>
+<b class="r">mount --bind /mnt/data/apfs5/private/var /mnt/macos/private/var</b>
+<i># now /mnt/macos approximates what the Mac itself saw — useful when running</i>
+<i># parsers that expect real macOS paths, e.g. mac_apt in some modes</i></pre>
+
+<h2 id="c13"><span class="hn">13</span>The catalog B-tree and its record types</h2>
+
+<p>One B-tree per volume ("fsroot") holds all filesystem metadata. Keys are
+<code>(object_id, record_type)</code>, so every record about one file sorts together.</p>
+
+<table class="tight">
+<thead><tr><th style="width:8%">Type</th><th style="width:24%">Name</th><th>What it gives you</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>SNAP_METADATA</td><td>A snapshot's name, XID and tree pointers — <a href="#c42">§42</a></td></tr>
+<tr><td>2</td><td>EXTENT</td><td>Physical extent reference counts — how clone sharing is tracked</td></tr>
+<tr><td>3</td><td><b>INODE</b></td><td>The file record: parent, timestamps, mode, owner, flags, extended fields</td></tr>
+<tr><td>4</td><td><b>XATTR</b></td><td>Extended attributes — quarantine, provenance, Finder info. <a href="#c47">§47</a></td></tr>
+<tr><td>5</td><td>SIBLING_LINK</td><td>Hard link siblings — one inode, several names</td></tr>
+<tr><td>6</td><td>DSTREAM_ID</td><td>Data stream reference counting</td></tr>
+<tr><td>7</td><td>CRYPTO_STATE</td><td>Per-file encryption state and protection class</td></tr>
+<tr><td>8</td><td><b>FILE_EXTENT</b></td><td>Where the file's bytes physically are — the map for carving</td></tr>
+<tr><td>9</td><td><b>DIR_REC</b></td><td>A directory entry: name → child object id</td></tr>
+<tr><td>10</td><td>DIR_STATS</td><td>Directory size accounting</td></tr>
+<tr><td>11</td><td>SNAP_NAME</td><td>Snapshot name → XID lookup</td></tr>
+<tr><td>12</td><td>SIBLING_MAP</td><td>Reverse hard-link mapping</td></tr>
+<tr><td>13</td><td>FILE_INFO</td><td>Per-file data hashes on sealed volumes — <a href="#c46">§46</a></td></tr>
+</tbody>
+</table>
+
+<h3>13.1 The inode record's useful fields</h3>
+
+<div class="kv">
+<b>parent_id</b><span>Object id of the containing directory — how you rebuild a path from an orphaned inode</span>
+<b>private_id</b><span>The inode's own id; for files, also the data stream id</span>
+<b>create/mod/change/access_time</b><span>Four uint64 nanosecond Unix timestamps — <a href="#c14">§14</a></span>
+<b>internal_flags</b><span>Includes <code>INODE_WAS_EVER_CLONED</code>, <code>INODE_IS_SPARSE</code>, <code>INODE_HAS_RSRC_FORK</code>, <code>INODE_NO_RSRC_FORK</code></span>
+<b>bsd_flags</b><span>BSD file flags — <code>UF_HIDDEN</code>, <code>UF_IMMUTABLE</code>, <code>SF_RESTRICTED</code>. Hidden and immutable files matter.</span>
+<b>owner / group / mode</b><span>UID, GID, permissions. Cross-reference UIDs against <a href="#c55">§55</a> when accounts have been deleted.</span>
+<b>write_generation_counter</b><span><b>Increments on every write to the file.</b> A file with an old mtime and a high write counter has been modified more than its timestamps admit.</span>
+<b>xfields</b><span>Extended fields: the real filename, dstream info, document id, Finder info, sparse byte count, purgeable flags</span>
+</div>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — THE WRITE GENERATION COUNTER</span>
+<p>Almost nothing surfaces this field, and no timestamp-manipulation tool resets it, because it is not
+reachable through any documented API. A file whose <code>mod_time</code> claims one write but whose
+<code>write_generation_counter</code> reads 400 has been written 400 times. Pair it with the XID
+(<a href="#c43">§43</a>) and you have two independent witnesses against a forged timestamp.</p></div>
+
+<h2 id="c14"><span class="hn">14</span>Time in APFS</h2>
+
+<p>Four timestamps per inode, all uint64 nanoseconds since the Unix epoch — not the Mac absolute time
+(2001 epoch) you will meet inside Apple's own databases in Part VII. Do not mix them up.</p>
+
+<table class="tight">
+<thead><tr><th style="width:14%">Field</th><th style="width:12%">Shorthand</th><th>Moves when</th><th style="width:26%">Forger's difficulty</th></tr></thead>
+<tbody>
+<tr><td>create_time</td><td>B (birth)</td><td>The inode is created. Never updated afterwards by normal operation.</td><td>Settable via API</td></tr>
+<tr><td>mod_time</td><td>M</td><td>File <em>contents</em> change</td><td>Trivially settable (<code>touch</code>)</td></tr>
+<tr><td>change_time</td><td>C</td><td>File <em>metadata</em> changes — permissions, ownership, xattrs, <b>and any change to the other timestamps</b></td><td><b>Hard</b> — see below</td></tr>
+<tr><td>access_time</td><td>A</td><td>File is read. Often unreliable: macOS mounts do update it, but caching and <code>noatime</code>-like behaviour make it lossy.</td><td>Settable</td></tr>
+</tbody>
+</table>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — CHANGE TIME IS THE ONE THEY FORGET</span>
+<p><code>change_time</code> is updated by the kernel whenever inode metadata is touched — including
+when someone rewrites <code>mod_time</code>. There is no supported way to set it directly. So the
+classic timestomp signature is:</p>
+<pre class="dia"><b>create_time</b>  2019-03-14 09:12:00   <i>← claimed</i>
+<b>mod_time</b>     2019-03-14 09:12:00   <i>← claimed</i>
+<b>change_time</b>  <s>2026-07-31 02:44:17</s>   <i>← when the lie was told</i>
+<b>access_time</b>  2019-03-14 09:12:00</pre>
+<p>A <code>change_time</code> substantially later than all three others, with no plausible metadata
+event to explain it, is a timestomp until proven otherwise. Tools that stomp all four exist — but
+setting <code>change_time</code> requires either changing the system clock (which leaves its own
+tracks in the unified log) or writing to the raw device. Both are noisy. See <a href="#c53">§53</a>
+for how to corroborate.</p></div>
+
+<pre class="sh"><i># read all four with nanosecond precision from a mounted volume</i>
+<b>stat --printf='B %w\nM %y\nC %z\nA %x\n' /mnt/data/apfs5/Users/jdoe/Documents/notes.rtf</b>
+
+<i># fsapfsinfo gives them straight from the inode record, bypassing FUSE translation</i>
+<b>fsapfsinfo -o 524308480 -p 'PW' -f 5 -E 'Users/jdoe/Documents/notes.rtf' \
+    /evidence/mbp-001.dd</b></pre>
+
+<div class="cal note"><span class="ct">● NOTE — FUSE MAY NOT GIVE YOU BIRTH TIME</span>
+<p><code>stat</code>'s <code>%w</code> (birth) often reports <code>-</code> through a FUSE mount
+because the FUSE protocol has no universal birth-time field. When the creation time matters — and in
+timestamp analysis it always matters — read it from <code>fsapfsinfo</code> or through
+<code>pyfsapfs</code>, not from <code>stat</code>.</p></div>
+
+<h2 id="c15"><span class="hn">15</span>Clones, snapshots, tombstones and copy-on-write</h2>
+
+<h3>15.1 Copy-on-write changes what "deleted" means</h3>
+
+<p>APFS never overwrites a live block. Modifying a file allocates new blocks and repoints the tree;
+the old blocks become unreferenced but remain on disk until reused. Two consequences that invert
+habits formed on NTFS or ext4:</p>
+
+<ul class="tk">
+<li><b>Old versions of files persist far longer than expected.</b> Every save of a document may have
+left its predecessor intact somewhere in free space.</li>
+<li><b>Classical carving underperforms.</b> Files are fragmented across non-contiguous extents by
+design, so header/footer carvers reassemble them badly. Extent-aware recovery beats carving on APFS —
+see <a href="#c19">§19</a> and <a href="#c45">§45</a>.</li>
+</ul>
+
+<h3>15.2 Clones</h3>
+
+<p>Copying a file in Finder creates a <em>clone</em>: a second inode pointing at the same physical
+extents, with a reference count. No data is duplicated until one side is written.</p>
+
+<p>Forensically: two files with identical content may share every block, so finding "a copy" of a
+file tells you nothing about when it was copied unless you look at the inode. The
+<code>INODE_WAS_EVER_CLONED</code> flag records that a clone relationship once existed <b>even after
+the other side is deleted</b> — evidence that a file was duplicated, surviving the deletion of the
+duplicate.</p>
+
+<h3>15.3 Snapshots</h3>
+
+<p>A snapshot pins the object map at a given XID, freezing an entire consistent filesystem state.
+macOS creates them constantly and mostly silently:</p>
+
+<div class="kv">
+<b>Time Machine local</b><span><code>com.apple.TimeMachine.YYYY-MM-DD-HHMMSS.local</code> — created hourly when a backup destination is configured, retained ~24h, and <b>created before every OS update</b></span>
+<b>Installer</b><span>Taken automatically before a macOS upgrade</span>
+<b>Manual / third-party</b><span>Backup software, <code>tmutil localsnapshot</code></span>
+</div>
+
+<pre class="sh"><i># enumerate every snapshot on the Data volume</i>
+<b>fsapfsinfo -o 524308480 -p 'PW' -f 5 -s /evidence/mbp-001.dd</b>
+Snapshot: 1
+	Name  : com.apple.TimeMachine.2026-07-28-031500.local
+	XID   : 198442
+	Time  : Jul 28, 2026 03:15:02 UTC
+Snapshot: 2
+	Name  : com.apple.TimeMachine.2026-07-28-041502.local
+	XID   : 199013
+
+<i># apfs-fuse mounts one directly by name</i>
+<b class="r">apfs-fuse -v 4 -p 'PW' -s 'com.apple.TimeMachine.2026-07-28-031500.local' \
+    -o ro ${LOOP}p2 /mnt/snap1</b></pre>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — SNAPSHOTS DEFEAT ANTI-FORENSICS FOR FREE</span>
+<p>An attacker deletes their toolkit and wipes the logs. If any local snapshot predates the cleanup —
+and one is created hourly on any Mac with Time Machine configured — <b>the deleted files and the
+original logs are sitting inside it, fully intact and trivially readable</b>. Snapshot enumeration
+should be one of the first things you do on any volume, not an afterthought. <a href="#c42">§42</a> is
+the full treatment, including how to detect snapshots that were themselves deleted.</p></div>
+
+<h3>15.4 Tombstones</h3>
+
+<p>Deleting a file removes its records from the current catalog tree, but snapshots referencing older
+XIDs still resolve them. The records are not gone; they are unreachable from the present. Walking
+older trees directly — via snapshots (<a href="#c42">§42</a>) or checkpoints
+(<a href="#c41">§41</a>) — recovers them with full metadata, which is dramatically better than carving
+because you get the name, the path, and the timestamps back too.</p>
+
+<h2 id="c16"><span class="hn">16</span>Sealed System Volume and cryptexes</h2>
+
+<h3>16.1 What the seal is</h3>
+
+<p>Since Big Sur the System volume is cryptographically sealed. A Merkle tree of SHA-256 hashes covers
+every file's contents; the tree's root hash — the <b>seal</b> — is stored in the volume's integrity
+metadata and verified at boot against Apple's signature. Any modification to any byte of the system
+volume changes the root hash and breaks the seal.</p>
+
+<div class="cal tip"><span class="ct">▸ TIP — A BROKEN SEAL IS A HIGH-CONFIDENCE FINDING</span>
+<p>You do not need Apple's expected value to make use of this. Recompute the tree from the volume's
+own <code>FILE_INFO</code> records and compare against the stored root hash. A mismatch means the
+system volume was modified after sealing — which, on a machine that boots normally, essentially
+requires deliberate action. <a href="#c46">§46</a> covers the procedure.</p></div>
+
+<pre class="sh"><i># confirm the volume is sealed and read the stored root hash</i>
+<b>fsapfsinfo -o 524308480 -f 1 /evidence/mbp-001.dd | grep -i -A4 'seal\|integrity'</b>
+	Compatible features       : sealed volume
+	Integrity metadata:
+		Hash type         : SHA-256
+		Root hash         : 4f9c2a...e71b
+		Flags             : 0x00000000</pre>
+
+<div class="cal note"><span class="ct">● NOTE — THE "BROKEN SEAL" FLAG</span>
+<p>The integrity metadata carries an <code>APFS_SEAL_BROKEN</code> flag which macOS itself sets when
+the seal is invalidated. If that flag is set, the system was booted with a knowingly modified system
+volume — which requires reduced security mode to have been enabled. That in turn leaves a record on
+the Preboot volume (<a href="#c49">§49</a>). Two independent artifacts, one story.</p></div>
+
+<h3>16.2 Cryptexes <span class="tag">13+</span></h3>
+
+<p>Ventura introduced <b>cryptexes</b> — cryptographically sealed disk images mounted over the system
+at boot, used to ship Safari, dyld caches, and Rapid Security Responses without re-sealing the whole
+system volume. They live on the Preboot volume:</p>
+
+<pre class="sh"><b>ls /mnt/preboot/apfs2/Cryptexes/</b>
+App  OS  Incoming
+
+<b>find /mnt/preboot/apfs2/Cryptexes -maxdepth 2 -name '*.dmg' -o -name '*.im4m' | head</b></pre>
+
+<p>Two reasons to look:</p>
+<ul class="tk">
+<li><b>Version determination.</b> An RSR changes the effective OS build without changing
+<code>SystemVersion.plist</code>. If your artifact paths depend on the exact build — and some do — the
+cryptex tells you the truth.</li>
+<li><b>An unusual persistence surface.</b> Cryptexes are signed and verified, so subverting one is not
+casual work. But their presence in <code>Incoming/</code>, unexpected contents, or a cryptex that does
+not correspond to a known Apple release deserves explanation.</li>
+</ul>

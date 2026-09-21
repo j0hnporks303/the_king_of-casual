@@ -1,0 +1,635 @@
+<!-- ============================ PART IX ============================ -->
+<section class="partdiv">
+  <div class="pnum">IX</div>
+  <h1>The Exotic Chapter</h1>
+  <div class="blurb">Everything that does not fit a checklist. Reconstructing filesystem states nobody
+  saved, catching timestamps that lie, reading the attributes that survive deletion, and pulling
+  evidence out of the volumes every other guide ignores. This part assumes Parts III and IV — it
+  operates on structure, not on files.</div>
+  <div class="toc-mini">
+    <div><span>41</span>Checkpoint time-travel</div>
+    <div><span>42</span>Snapshot archaeology</div>
+    <div><span>43</span>XID and inode anomaly detection</div>
+    <div><span>44</span>Orphans, tombstones and dangling extents</div>
+    <div><span>45</span>Free space and the space manager</div>
+    <div><span>46</span>Verifying the seal</div>
+    <div><span>47</span>Extended attribute archaeology</div>
+    <div><span>48</span>decmpfs and compressed payloads</div>
+    <div><span>49</span>Preboot and Recovery volume analysis</div>
+    <div><span>50</span>The VM volume</div>
+    <div><span>51</span>Firmlink confusion and path hiding</div>
+    <div><span>52</span>Slack, sibling links and oversized xattrs</div>
+    <div><span>53</span>Timestamp triangulation</div>
+    <div><span>54</span>Anti-forensics detection</div>
+    <div><span>55</span>Deleted accounts and identity remnants</div>
+    <div><span>56</span>Keychain extraction</div>
+    <div><span>57</span>Mach-O triage without Apple tooling</div>
+    <div><span>58</span>Entropy mapping the container</div>
+    <div><span>59</span>Honest limits</div>
+  </div>
+</section>
+
+<h2 id="c41"><span class="hn">41</span>Checkpoint time-travel</h2>
+
+<p>The checkpoint descriptor area holds superseded container superblocks — complete roots of the
+filesystem as it existed at earlier transactions. Because APFS is copy-on-write, the trees those roots
+point at are frequently still intact on disk. Reconstructing one gives you the entire filesystem as it
+was, with names, paths and metadata, for a moment nobody chose to snapshot.</p>
+
+<h3>41.1 Parsing the container superblock</h3>
+
+<p>Field offsets, all little-endian, from the start of the block:</p>
+
+<table class="tight">
+<thead><tr><th style="width:12%">Offset</th><th style="width:12%">Size</th><th style="width:30%">Field</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td>0x00</td><td>8</td><td><code>o_cksum</code></td><td>Fletcher-64 over bytes 8..end</td></tr>
+<tr><td>0x08</td><td>8</td><td><code>o_oid</code></td><td>Object id</td></tr>
+<tr><td>0x10</td><td>8</td><td><code>o_xid</code></td><td><b>Transaction id — how you order checkpoints</b></td></tr>
+<tr><td>0x18</td><td>4</td><td><code>o_type</code></td><td>Object type</td></tr>
+<tr><td>0x20</td><td>4</td><td><code>nx_magic</code></td><td><code>'NXSB'</code> = <code>4E 58 53 42</code></td></tr>
+<tr><td>0x24</td><td>4</td><td><code>nx_block_size</code></td><td>Usually 4096</td></tr>
+<tr><td>0x28</td><td>8</td><td><code>nx_block_count</code></td><td>Container size in blocks</td></tr>
+<tr><td>0x60</td><td>8</td><td><code>nx_next_xid</code></td><td>Next transaction to be issued</td></tr>
+<tr><td>0x68</td><td>4</td><td><code>nx_xp_desc_blocks</code></td><td>Size of the descriptor ring</td></tr>
+<tr><td>0x70</td><td>8</td><td><code>nx_xp_desc_base</code></td><td><b>Block address of the descriptor area</b></td></tr>
+<tr><td>0x78</td><td>8</td><td><code>nx_xp_data_base</code></td><td>Block address of the data area</td></tr>
+<tr><td>0x98</td><td>8</td><td><code>nx_spaceman_oid</code></td><td>Space manager — <a href="#c45">§45</a></td></tr>
+<tr><td>0xA0</td><td>8</td><td><code>nx_omap_oid</code></td><td>Container object map</td></tr>
+<tr><td>0xB8</td><td>800</td><td><code>nx_fs_oid[100]</code></td><td>Volume superblock object ids</td></tr>
+</tbody>
+</table>
+
+<pre class="sh"><b>cat &gt; ~/cases/001/06-analysis/nxsb_scan.py &lt;&lt;'PY'</b>
+<b class="n">#!/usr/bin/env python3</b>
+<b class="n">"""Enumerate every valid container superblock in the checkpoint descriptor area."""</b>
+<b class="n">import struct, sys</b>
+
+<b class="n">IMG   = sys.argv[1]</b>
+<b class="n">START = int(sys.argv[2])        # container byte offset, from mmls</b>
+<b class="n">BS    = 4096</b>
+
+<b class="n">def fletcher64(data):</b>
+<b class="n">    """APFS variant: computed over the object excluding the 8-byte checksum."""</b>
+<b class="n">    lo = hi = 0</b>
+<b class="n">    for i in range(0, len(data), 4):</b>
+<b class="n">        lo = (lo + int.from_bytes(data[i:i+4], 'little')) % 0xFFFFFFFF</b>
+<b class="n">        hi = (hi + lo) % 0xFFFFFFFF</b>
+<b class="n">    c1 = (0xFFFFFFFF - ((lo + hi) % 0xFFFFFFFF))</b>
+<b class="n">    c2 = (0xFFFFFFFF - ((lo + c1) % 0xFFFFFFFF))</b>
+<b class="n">    return (c2 &lt;&lt; 32) | c1</b>
+
+<b class="n">with open(IMG, 'rb') as f:</b>
+<b class="n">    f.seek(START)</b>
+<b class="n">    blk0 = f.read(BS)</b>
+<b class="n">    assert blk0[0x20:0x24] == b'NXSB', 'not an APFS container at that offset'</b>
+<b class="n">    desc_base   = struct.unpack_from('&lt;Q', blk0, 0x70)[0]</b>
+<b class="n">    desc_blocks = struct.unpack_from('&lt;I', blk0, 0x68)[0] &amp; 0x7FFFFFFF</b>
+<b class="n">    print(f'descriptor area: block {desc_base}, {desc_blocks} blocks\n')</b>
+
+<b class="n">    found = []</b>
+<b class="n">    for i in range(desc_blocks):</b>
+<b class="n">        f.seek(START + (desc_base + i) * BS)</b>
+<b class="n">        b = f.read(BS)</b>
+<b class="n">        if b[0x20:0x24] != b'NXSB':</b>
+<b class="n">            continue</b>
+<b class="n">        xid    = struct.unpack_from('&lt;Q', b, 0x10)[0]</b>
+<b class="n">        stored = struct.unpack_from('&lt;Q', b, 0x00)[0]</b>
+<b class="n">        valid  = fletcher64(b[8:]) == stored</b>
+<b class="n">        found.append((xid, desc_base + i, valid))</b>
+
+<b class="n">for xid, blk, ok in sorted(found):</b>
+<b class="n">    print(f'xid {xid:12d}  block {blk:8d}  checksum {"OK" if ok else "BAD"}')</b>
+<b class="n">print(f'\n{len(found)} checkpoints recoverable')</b>
+<b class="n">PY</b>
+
+<b>python3 ~/cases/001/06-analysis/nxsb_scan.py /evidence/mbp-001.dd 524308480</b>
+descriptor area: block 193, 280 blocks
+
+xid       214402  block      201  checksum OK
+xid       214409  block      208  checksum OK
+xid       214417  block      216  checksum OK
+
+23 checkpoints recoverable</pre>
+
+<h3>41.2 Mounting an earlier checkpoint</h3>
+
+<p>Writing a full B-tree walker for an arbitrary checkpoint is a project. There is a much cheaper
+route that gets you a mountable filesystem: <b>make an older checkpoint the newest one</b>, on a
+copy-on-write overlay, and let the existing tools do the work.</p>
+
+<div class="cal caution"><span class="ct">■ CAUTION — OVERLAY ONLY, NEVER THE IMAGE</span>
+<p>This technique writes to the container. It must be performed against the device-mapper overlay from
+<a href="#c4">§4.3</a>. Verify with <code>lsblk</code> that you are pointed at
+<code>/dev/mapper/evid-cow</code> before any <code>dd</code>, and re-verify the master hash afterwards.</p></div>
+
+<pre class="sh"><i># 1. build the COW overlay (see §4.3) and confirm the target</i>
+<b>lsblk /dev/mapper/evid-cow</b>
+
+<i># 2. neutralise every checkpoint newer than the one you want, by corrupting</i>
+<i>#   their magic so the mounter skips them. Here: keep xid 214402 at block 201.</i>
+<b class="r">for blk in 208 216; do
+     printf 'XXXX' | dd of=/dev/mapper/evid-cow bs=1 \
+        seek=$((524308480 + blk*4096 + 0x20)) conv=notrunc
+   done</b>
+
+<i># 3. copy the chosen older superblock over block 0 as well</i>
+<b class="r">dd if=/dev/mapper/evid-cow of=/tmp/old-nxsb.bin bs=4096 \
+      skip=$(( (524308480/4096) + 201 )) count=1</b>
+<b class="r">dd if=/tmp/old-nxsb.bin of=/dev/mapper/evid-cow bs=4096 \
+      seek=$(( 524308480/4096 )) count=1 conv=notrunc</b>
+
+<i># 4. mount normally — you are now looking at the filesystem at xid 214402</i>
+<b class="r">apfs-fuse -v 4 -p 'PW' -o ro /dev/mapper/evid-cow /mnt/past</b>
+<b>ls -la /mnt/past/Users/jdoe/Downloads/</b>
+
+<i># 5. tear down and prove the master is untouched</i>
+<b class="r">fusermount3 -u /mnt/past; dmsetup remove evid-cow</b>
+<b>sha256sum -c /evidence/mbp-001.dd.sha256</b></pre>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — WHAT THIS BUYS YOU, AND WHAT IT DOES NOT</span>
+<p><b>Buys you:</b> the complete filesystem — paths, names, timestamps, contents — at a moment in the
+recent past that no snapshot covers. Checkpoints are written constantly, so the window is typically
+minutes to hours before acquisition. If a file was deleted an hour before the machine was seized, this
+is frequently the only way to get it back with its metadata intact.</p>
+<p><b>Does not buy you:</b> anything whose blocks have been reallocated since. Older checkpoints
+degrade — the oldest entries in the ring will often fail to mount because their trees have been partly
+overwritten. Work newest-to-oldest and expect a cliff. Also note the descriptor ring is small: this is
+a window of hours, not weeks. For weeks, you need snapshots.</p></div>
+
+<h2 id="c42"><span class="hn">42</span>Snapshot archaeology</h2>
+
+<p>Snapshots are the single highest-yield artifact on APFS, and the one most likely to defeat an
+adversary's cleanup entirely.</p>
+
+<h3>42.1 Enumerate everything, on every volume</h3>
+
+<pre class="sh"><b>for v in 1 2 3 4 5; do
+    echo "=== volume $v"
+    fsapfsinfo -o 524308480 -p 'PW' -f $v -s /evidence/mbp-001.dd 2&gt;/dev/null | \
+        grep -E 'Name|XID|Time'
+  done</b></pre>
+
+<h3>42.2 Mount them all and sweep each</h3>
+
+<pre class="sh"><b>SNAPS=$(fsapfsinfo -o 524308480 -p 'PW' -f 5 -s /evidence/mbp-001.dd | \
+        awk '/Name/{print $3}')</b>
+<b>i=0; for s in $SNAPS; do
+     i=$((i+1)); mkdir -p /mnt/snap$i
+     apfs-fuse -v 4 -p 'PW' -s "$s" -o ro /dev/loop0p2 /mnt/snap$i
+     echo "$i -> $s"
+   done</b>
+
+<i># run the §40 persistence sweep inside each, and hash the results</i>
+<b>for m in /mnt/snap*; do
+     find $m/Library/LaunchDaemons $m/Library/LaunchAgents \
+          $m/Users/*/Library/LaunchAgents -name '*.plist' 2&gt;/dev/null | \
+       sed "s|$m||" | sort &gt; ~/cases/001/06-analysis/persist-$(basename $m).txt
+   done</b>
+
+<i># the diff between the oldest snapshot and the live volume is the cleanup</i>
+<b>diff ~/cases/001/06-analysis/persist-snap1.txt \
+      ~/cases/001/06-analysis/persist-live.txt</b>
+&lt; /Users/jdoe/Library/LaunchAgents/com.apple.softwareupdated.plist</pre>
+
+<div class="cal tip"><span class="ct">▸ TIP — DIFF THE WHOLE TREE, NOT JUST PERSISTENCE</span>
+<p>A full recursive diff between a snapshot and the live volume is the fastest way to see everything
+that changed in that interval — files added, modified and deleted, all at once.</p>
+<pre class="sh"><b>diff -rq /mnt/snap1/Users /mnt/data/apfs5/Users 2&gt;/dev/null | head -100</b>
+Only in /mnt/snap1/Users/jdoe/Downloads: installer.pkg
+Files /mnt/snap1/Users/jdoe/.zsh_history and /mnt/data/.../\
+.zsh_history differ</pre>
+<p>That second line is worth pausing on: the shell history was <em>modified</em> between the snapshot
+and acquisition. The snapshot holds the version before it was edited.</p></div>
+
+<h3>42.3 Detecting deleted snapshots</h3>
+
+<p>An adversary who understands APFS will delete the snapshots. That deletion is itself detectable.</p>
+
+<ul class="tk">
+<li><b>Cadence gaps.</b> Time Machine local snapshots are created hourly and named with their
+timestamp. Sort the names; a missing hour in an otherwise unbroken hourly series, on a machine that
+was powered on through that hour (confirm via unified log or powerlog), means a snapshot was removed.</li>
+<li><b>XID gaps.</b> Snapshot XIDs advance with the container. A large XID jump between consecutive
+surviving snapshots indicates transactions — and probably snapshots — in between.</li>
+<li><b>Orphaned snapshot metadata.</b> Deletion removes the snapshot's records from the snapshot
+metadata tree, but the extents it pinned may not be immediately reclaimed. Blocks referenced by no
+live object and no surviving snapshot are the remains (<a href="#c45">§45</a>).</li>
+<li><b>The unified log records it.</b> Snapshot creation and deletion are logged. Grep the parsed
+unified log for <code>snapshot</code>, <code>APFSSnapshot</code>, <code>tmutil</code>,
+<code>localsnapshot</code>, <code>deletelocalsnapshots</code>.</li>
+</ul>
+
+<pre class="sh"><b>grep -iE 'snapshot|localsnapshot|tmutil' ~/cases/001/04-timeline/unifiedlog.csv | \
+    grep -iE 'delet|destroy|remov' | head -30</b></pre>
+
+<h2 id="c43"><span class="hn">43</span>XID and inode anomaly detection</h2>
+
+<p>The most reliable anti-timestomping technique available on APFS, and it requires nothing but
+metadata you already have.</p>
+
+<h3>43.1 The principle</h3>
+
+<p>Inode object identifiers are allocated sequentially from the volume superblock's
+<code>apfs_next_obj_id</code> counter. Every new file gets the next number. Therefore <b>object id
+order is creation order</b> — a fact no user-space tool can alter, because the counter is filesystem
+state, not file metadata.</p>
+
+<pre class="dia">   Normal volume:  object id ▲ correlates with creation time ▲
+
+   obj_id  2100000 ─────────────────────────────────── 2026-07-30  ✓
+   obj_id  2100001 ─────────────────────────────────── 2026-07-30  ✓
+   obj_id  <b>2100002</b> ─────────────────────────────────── <s>2019-03-14</s>  ✗  ← impossible
+   obj_id  2100003 ─────────────────────────────────── 2026-07-30  ✓</pre>
+
+<p>A file with a high object id and an old creation date was created recently and backdated. There is
+no benign explanation on a single volume: the counter only moves forward.</p>
+
+<h3>43.2 Detecting it</h3>
+
+<pre class="sh"><b>cat &gt; ~/cases/001/06-analysis/xid_anomaly.py &lt;&lt;'PY'</b>
+<b class="n">#!/usr/bin/env python3</b>
+<b class="n">"""Flag files whose inode number is inconsistent with their creation time."""</b>
+<b class="n">import subprocess, re, sys, statistics</b>
+
+<b class="n">IMG, OFF, VOL = sys.argv[1], sys.argv[2], sys.argv[3]</b>
+
+<b class="n"># body file gives inode + crtime for every file in one pass</b>
+<b class="n">out = subprocess.run(['fls','-o',OFF,'-B',VOL,'-r','-m','/',IMG],</b>
+<b class="n">                     capture_output=True, text=True).stdout</b>
+
+<b class="n">rows = []</b>
+<b class="n">for line in out.splitlines():</b>
+<b class="n">    p = line.split('|')</b>
+<b class="n">    if len(p) &lt; 11: continue</b>
+<b class="n">    try:</b>
+<b class="n">        inode  = int(p[2].split('-')[0])</b>
+<b class="n">        crtime = int(p[10])</b>
+<b class="n">    except ValueError:</b>
+<b class="n">        continue</b>
+<b class="n">    if crtime &gt; 0:</b>
+<b class="n">        rows.append((inode, crtime, p[1]))</b>
+
+<b class="n">rows.sort()                       # by inode = by true creation order</b>
+
+<b class="n"># walk forward; creation time should be non-decreasing. Report inversions.</b>
+<b class="n">high_water = 0; anomalies = []</b>
+<b class="n">for inode, crtime, name in rows:</b>
+<b class="n">    if crtime &lt; high_water - 86400:      # more than a day out of order</b>
+<b class="n">        anomalies.append((inode, crtime, high_water, name))</b>
+<b class="n">    high_water = max(high_water, crtime)</b>
+
+<b class="n">import datetime as dt</b>
+<b class="n">f = lambda t: dt.datetime.utcfromtimestamp(t).strftime('%Y-%m-%d %H:%M:%S')</b>
+<b class="n">print(f'{len(anomalies)} inode/timestamp inversions\n')</b>
+<b class="n">for inode, crtime, hw, name in anomalies[:60]:</b>
+<b class="n">    print(f'inode {inode:9d}  claims {f(crtime)}  '</b>
+<b class="n">          f'but neighbours are {f(hw)}\n    {name}')</b>
+<b class="n">PY</b>
+
+<b>python3 ~/cases/001/06-analysis/xid_anomaly.py /evidence/mbp-001.dd 1024040 1276</b>
+3 inode/timestamp inversions
+
+inode   2100002  claims 2019-03-14 09:12:00  but neighbours are 2026-07-30 02:38:44
+    /data/Users/jdoe/Library/LaunchAgents/com.apple.softwareupdated.plist</pre>
+
+<div class="cal caution"><span class="ct">■ CAUTION — LEGITIMATE INVERSIONS EXIST</span>
+<p>Before reporting a backdated file, rule out the innocent explanations:</p>
+<ul class="tk">
+<li><b>Restores.</b> Migration Assistant, Time Machine restores and <code>rsync -a</code> recreate
+files with preserved original timestamps and fresh inode numbers. A restore produces <em>thousands</em>
+of inversions in one contiguous inode range — a distinctive, obviously benign pattern.</li>
+<li><b>Archive extraction.</b> <code>tar -p</code>, <code>unzip</code> and installers preserve stored
+timestamps.</li>
+<li><b>Clock changes.</b> If the system clock moved backwards, everything created afterwards inverts.
+Check the unified log for <code>settimeofday</code> first.</li>
+</ul>
+<p>The finding is not "an inversion exists". It is "<b>an isolated inversion</b>, of a small number of
+files, in a persistence-relevant location, with no restore or clock event to explain it". That is what
+the output above shows: three anomalies, one of which is a launch agent.</p></div>
+
+<h3>43.3 Corroborating witnesses</h3>
+
+<p>Once you have a candidate, gather the independent evidence from <a href="#c13">§13.1</a> and
+<a href="#c14">§14</a>:</p>
+
+<table class="tight">
+<thead><tr><th style="width:32%">Witness</th><th>What it should show for a stomped file</th></tr></thead>
+<tbody>
+<tr><td>Inode number vs neighbours</td><td>Created recently, claims to be old</td></tr>
+<tr><td><code>change_time</code></td><td>Recent — the moment the lie was written</td></tr>
+<tr><td><code>write_generation_counter</code></td><td>Inconsistent with a file "untouched since 2019"</td></tr>
+<tr><td>Containing directory's <code>mod_time</code></td><td>Directory was modified when the file was really created</td></tr>
+<tr><td>FSEvents</td><td>A creation event for that path, at the real time</td></tr>
+<tr><td>Unified log / ExecPolicy</td><td>First-execution record at the real time</td></tr>
+<tr><td>Snapshots</td><td>File absent from snapshots older than its claimed date</td></tr>
+</tbody>
+</table>
+
+<p>That last one is decisive and trivially checkable: a file claiming creation in 2019 that does not
+appear in a snapshot taken last week did not exist last week.</p>
+
+<h2 id="c44"><span class="hn">44</span>Orphans, tombstones and dangling extents</h2>
+
+<h3>44.1 The private directory</h3>
+
+<p>APFS reserves two well-known object ids: <b>2</b> is the volume root directory, <b>3</b> is the
+private directory. Files that were unlinked while still open by a process are moved into the private
+directory rather than deleted — they have no name in any directory, but their inode and data remain
+fully intact until the last handle closes.</p>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — DELETED-BUT-OPEN FILES SURVIVE A DEAD-BOX SEIZURE</span>
+<p>If the machine was powered off abruptly — pulled plug, forced shutdown, battery removal — every
+file that a running process had unlinked but still held open is <b>sitting in the private directory,
+complete</b>. Malware that deletes itself from disk at launch and keeps running does exactly this. So
+does a logging process whose log was deleted underneath it.</p>
+<p>This is one of the few genuine advantages of an ungraceful shutdown, and almost nothing enumerates
+it automatically. Walk inodes whose <code>parent_id</code> is 3, or whose parent id resolves to no
+directory record at all.</p></div>
+
+<pre class="sh"><b>python3 - &lt;&lt;'PY'
+import pyfsapfs
+v = pyfsapfs.volume()
+c = pyfsapfs.container(); c.open('/evidence/mbp-001.dd')   # offset handling per your build
+# walk the file entries and report any whose parent is the private directory
+def walk(entry, path=''):
+    try: sub = entry.number_of_sub_file_entries
+    except Exception: return
+    for i in range(sub):
+        ch = entry.get_sub_file_entry(i)
+        yield ch, path + '/' + (ch.name or '?')
+        yield from walk(ch, path + '/' + (ch.name or '?'))
+PY</b>
+
+<i># practical alternative: TSK lists allocated inodes with no directory entry</i>
+<b>fls -o $OFF -B $DAT -r -p $IMG | awk '{print $2}' | sort -u &gt; /tmp/named.txt</b>
+<b>istat -o $OFF -B $DAT $IMG 3</b>       <i># the private directory itself</i></pre>
+
+<h3>44.2 Dangling extents</h3>
+
+<p>A <code>FILE_EXTENT</code> record maps a range of blocks to a file. When records are removed
+inconsistently — through corruption, interrupted deletion, or deliberate tampering — you get extents
+referencing blocks that no live inode claims. Those blocks hold real file content with no name
+attached.</p>
+
+<pre class="sh"><i># apfsck reports structural inconsistencies including orphaned records</i>
+<b class="r">apfsck -c /dev/mapper/evid-cow</b>
+<i># run against the OVERLAY: apfsck can be told to repair, and you never want that</i>
+<i># touching the evidence</i></pre>
+
+<h2 id="c45"><span class="hn">45</span>Free space and the space manager</h2>
+
+<p>On a copy-on-write filesystem, unreferenced blocks are where every superseded version of every file
+lives. Extracting them properly means reading the space manager's allocation bitmaps rather than
+trusting a tool's idea of "unallocated".</p>
+
+<div class="cal caution"><span class="ct">■ CAUTION — THIS DOES NOT WORK ON THE ENCRYPTED VOLUME</span>
+<p>Free blocks belonging to a FileVault-encrypted volume contain ciphertext encrypted with per-file
+keys that are gone along with their inodes. There is nothing to recover: the plaintext is
+unrecoverable even with the volume password, because the per-file key was destroyed with the file's
+crypto state record.</p>
+<p>Free-space work is therefore productive on the <b>unencrypted</b> volumes only — System, Preboot,
+Recovery, VM — and on any unencrypted external media images you hold. Know this before you spend a day
+on it. It is the single most common wasted effort on a FileVault case.</p></div>
+
+<h3>45.1 Reading the allocation bitmap</h3>
+
+<pre class="sh"><i># the space manager object id comes from the container superblock at 0x98</i>
+<b>python3 - &lt;&lt;'PY'
+import struct
+IMG='/evidence/mbp-001.dd'; START=524308480; BS=4096
+f=open(IMG,'rb'); f.seek(START); b=f.read(BS)
+print('spaceman oid :', struct.unpack_from('&lt;Q', b, 0x98)[0])
+print('omap oid     :', struct.unpack_from('&lt;Q', b, 0xA0)[0])
+print('block count  :', struct.unpack_from('&lt;Q', b, 0x28)[0])
+PY</b></pre>
+
+<p>The space manager points at chunk-info blocks, each of which points at a bitmap block covering a
+run of container blocks — one bit per block, set meaning allocated. Walking that structure gives you
+an authoritative free list. For unencrypted volumes, extract those blocks and treat the result as a
+carving target:</p>
+
+<pre class="sh"><i># once you have a list of free block addresses in freeblocks.txt</i>
+<b>while read blk; do
+     dd if=/evidence/mbp-001.dd bs=4096 skip=$(( (524308480/4096) + blk )) \
+        count=1 status=none
+   done &lt; freeblocks.txt &gt; ~/cases/001/05-carve/freespace.raw</b>
+
+<b>bulk_extractor -o ~/cases/001/05-carve/freespace-be ~/cases/001/05-carve/freespace.raw</b>
+<b>photorec /d ~/cases/001/05-carve/freespace-pr ~/cases/001/05-carve/freespace.raw</b></pre>
+
+<div class="cal tip"><span class="ct">▸ TIP — TRIAGE BY ENTROPY BEFORE CARVING</span>
+<p>Most free space is zeroes or ciphertext. Measure before you carve: split the extracted free space
+into chunks, compute entropy per chunk, and only carve the regions that look like structured data.
+<a href="#c58">§58</a> has the method. It routinely turns an overnight carve into a ten-minute one.</p></div>
+
+<h2 id="c46"><span class="hn">46</span>Verifying the seal</h2>
+
+<p>The sealed System volume carries a SHA-256 for every file it contains, and a Merkle root over the
+whole set. This gives you two capabilities: proving the OS was not modified, and — more usefully — a
+complete, version-exact known-good hash set.</p>
+
+<h3>46.1 Read the stored seal and the broken flag</h3>
+
+<pre class="sh"><b>fsapfsinfo -o 524308480 -f 1 /evidence/mbp-001.dd | grep -i -A6 'integrity'</b>
+	Integrity metadata:
+		Version           : 1
+		Hash type         : SHA-256 (1)
+		Root hash         : 4f9c2a...e71b
+		Flags             : 0x00000000
+<i># flags bit 0 = APFS_SEAL_BROKEN. Non-zero here is a finding on its own.</i></pre>
+
+<h3>46.2 Verify files against their FILE_INFO hashes</h3>
+
+<pre class="sh"><i># hash every file on the mounted System volume</i>
+<b>find /mnt/sys/apfs1 -type f -print0 | \
+    xargs -0 -P4 sha256sum &gt; ~/cases/001/06-analysis/system-actual.sha256</b>
+
+<i># compare against the hashes APFS itself stores per file.</i>
+<i># fsapfsinfo exposes them per entry; mac_apt's plugin does this in bulk.</i>
+<b>python3 ~/tools/mac_apt/mac_apt.py -o ~/cases/001/06-analysis/macapt \
+    MOUNTED /mnt/sys/apfs1 UNIFIEDLOGS BASICINFO</b></pre>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — A MODIFIED SYSTEM BINARY IS NOT SUBTLE, AND THAT IS THE POINT</span>
+<p>Modifying the sealed volume requires disabling SIP, booting to recovery, and reducing security —
+all of which leave records (unified log, Preboot LocalPolicy, NVRAM). An attacker who does it anyway
+is either very confident or very careless. Either way the mismatch between a file's actual SHA-256
+and its stored <code>FILE_INFO</code> hash names the modified file precisely.</p>
+<p><b>Remember your own footprint.</b> You disabled SIP during acquisition (<a href="#c1">§1.2</a>).
+That does not break the seal by itself — it changes the boot policy, not the volume — but confirm the
+timing of any Preboot changes against your acquisition record before attributing them to anyone
+else.</p></div>
+
+<h3>46.3 Using the seal as a hash set</h3>
+
+<p>The more valuable everyday use. Every file on the System volume has an authoritative hash placed
+there by Apple for <em>this exact build</em>. Extract them all and use the set to eliminate known-good
+files across your entire examination — more precise than NSRL, and already on your image.</p>
+
+<h2 id="c47"><span class="hn">47</span>Extended attribute archaeology</h2>
+
+<p>macOS hangs a remarkable amount of history off files as extended attributes. Most examinations look
+at exactly one of them.</p>
+
+<div class="wrap">
+<table class="tight">
+<thead><tr><th style="width:36%">Attribute</th><th>What it records</th></tr></thead>
+<tbody>
+<tr><td><code>com.apple.quarantine</code></td><td>Downloading agent, timestamp, event UUID (<a href="#c27">§27</a>)</td></tr>
+<tr><td><code>com.apple.metadata:kMDItemWhereFroms</code></td><td>Source URL and referrer, as a binary plist</td></tr>
+<tr><td><b><code>com.apple.macl</code></b></td><td><b>Which applications the user granted access to this file</b> — see below</td></tr>
+<tr><td><code>com.apple.lastuseddate#PS</code></td><td>Last-opened time, maintained by Launch Services independently of atime</td></tr>
+<tr><td><code>com.apple.FinderInfo</code></td><td>Finder flags, including the hidden bit and legacy type/creator codes</td></tr>
+<tr><td><code>com.apple.ResourceFork</code></td><td>Resource fork content — including compressed data (<a href="#c48">§48</a>)</td></tr>
+<tr><td><code>com.apple.provenance</code></td><td>Installation provenance on newer systems</td></tr>
+<tr><td><code>com.apple.TextEncoding</code></td><td>Encoding hint — occasionally reveals a document's origin locale</td></tr>
+<tr><td><code>com.apple.diskimages.*</code></td><td>On DMGs: checksum state and last verification</td></tr>
+</tbody>
+</table>
+</div>
+
+<pre class="sh"><i># dump every xattr on every file in a tree, base64 for binary values</i>
+<b>getfattr -R -d -m '.*' -e base64 /mnt/data/apfs5/Users/jdoe/ \
+    &gt; ~/cases/001/06-analysis/xattrs-jdoe.txt 2&gt;/dev/null</b>
+
+<i># which attributes exist at all, ranked — a good orientation step</i>
+<b>grep -oP '^[a-z0-9.#]+(?==)' ~/cases/001/06-analysis/xattrs-jdoe.txt | \
+    sort | uniq -c | sort -rn</b>
+  48211 com.apple.lastuseddate#PS
+   9033 com.apple.quarantine
+   4120 com.apple.macl
+    881 com.apple.metadata:kMDItemWhereFroms</pre>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — com.apple.macl NAMES THE APPLICATION THAT OPENED THE FILE</span>
+<p>When a user opens a file through a sandboxed app's file dialog, macOS writes an entry into
+<code>com.apple.macl</code> recording the UUID of the application granted access. It is not a
+timestamp and not a log — it is a durable record that <b>this specific application was given access to
+this specific file</b>, and it <b>survives copying the file to another location and another
+volume</b>.</p>
+<p>Practical uses: proving a document was opened by a particular application even though the app's own
+recent-items list was cleared; establishing that a file copied to a USB stick had previously been
+opened on this machine; and linking a file to an application that has since been deleted. Almost
+nothing in the standard toolchain surfaces it — you have to ask for it by name.</p>
+<pre class="sh"><b>getfattr -n com.apple.macl -e hex --only-values \
+    /mnt/data/apfs5/Users/jdoe/Documents/plans.pdf</b></pre></div>
+
+<div class="cal tip"><span class="ct">▸ TIP — lastuseddate#PS IS A BETTER "OPENED" TIMESTAMP THAN atime</span>
+<p>Access times on macOS are unreliable — updated inconsistently, and clobbered by backup and indexing
+processes touching every file. <code>com.apple.lastuseddate#PS</code> is written by Launch Services
+when a document is actually <em>opened by a user</em>, and it is a much stronger indicator of human
+interaction. It is a little-endian <code>timespec</code>: 8 bytes of Unix seconds, 8 bytes of
+nanoseconds.</p>
+<pre class="sh"><b>getfattr -n 'com.apple.lastuseddate#PS' -e hex --only-values file.pdf | \
+  sed 's/^0x//' | head -c16 | \
+  python3 -c "import sys,struct,datetime;
+d=bytes.fromhex(sys.stdin.read());
+print(datetime.datetime.utcfromtimestamp(struct.unpack('&lt;q',d)[0]))"</b></pre></div>
+
+<h2 id="c48"><span class="hn">48</span>decmpfs and compressed payloads</h2>
+
+<p>macOS transparently compresses files, storing the compressed data either inline in the
+<code>com.apple.decmpfs</code> extended attribute or in the resource fork. The file reports its
+uncompressed size and has <b>no data extents at all</b>.</p>
+
+<table class="tight">
+<thead><tr><th style="width:16%">Type</th><th style="width:28%">Algorithm</th><th>Storage</th></tr></thead>
+<tbody>
+<tr><td>3 / 4</td><td>zlib</td><td>3 = inline in xattr, 4 = resource fork</td></tr>
+<tr><td>7 / 8</td><td>LZVN</td><td>7 = inline, 8 = resource fork</td></tr>
+<tr><td>11 / 12</td><td>LZFSE</td><td>11 = inline, 12 = resource fork</td></tr>
+</tbody>
+</table>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — A FILE WITH NO EXTENTS THAT IS NOT EMPTY</span>
+<p>Two consequences that bite:</p>
+<p><b>Tools disagree.</b> <code>apfs-fuse</code> decompresses transparently and shows you the real
+content. TSK and some libfsapfs paths may report the file's logical size but return no data, making it
+look like an empty or sparse file. If <code>icat</code> gives you nothing for a file that
+<code>apfs-fuse</code> shows as 40&nbsp;KB of text, it is compressed — not deleted, not corrupt.</p>
+<p><b>It is a hiding place.</b> Content stored in a resource fork or decmpfs attribute is invisible to
+anything that only walks data extents — including most carvers and any script that reads block
+allocations. Sweep for the attribute explicitly rather than assuming your tools handled it.</p>
+<pre class="sh"><b>getfattr -R -n com.apple.decmpfs --only-values /mnt/data/apfs5/Users/ 2&gt;/dev/null | head</b>
+<i># files carrying a resource fork are worth enumerating too</i>
+<b>getfattr -R -m 'com.apple.ResourceFork' /mnt/data/apfs5/Users/ 2&gt;/dev/null | \
+    grep '^# file' | head -40</b></pre></div>
+
+<h2 id="c49"><span class="hn">49</span>Preboot and Recovery volume analysis</h2>
+
+<p>Two unencrypted volumes that most examinations skip entirely. They are small, they are rarely
+modified, and that combination makes any modification meaningful.</p>
+
+<h3>49.1 Preboot</h3>
+
+<pre class="sh"><b>fsapfsmount -o 524308480 -f 2 /evidence/mbp-001.dd /mnt/preboot</b>
+<b>find /mnt/preboot/apfs2 -maxdepth 3 | head -40</b>
+/mnt/preboot/apfs2/&lt;DataVolumeUUID&gt;
+/mnt/preboot/apfs2/&lt;DataVolumeUUID&gt;/System/Library/CoreServices
+/mnt/preboot/apfs2/&lt;DataVolumeUUID&gt;/var/db
+/mnt/preboot/apfs2/&lt;DataVolumeUUID&gt;/LocalPolicy
+/mnt/preboot/apfs2/Cryptexes</pre>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — LocalPolicy RECORDS THE SECURITY DOWNGRADE</span>
+<p>On Apple Silicon, <code>LocalPolicy/*.img4</code> encodes the machine's boot security posture:
+Full, Reduced or Permissive security; whether SIP is disabled; whether third-party kexts are allowed;
+whether the boot policy permits an unsealed system volume.</p>
+<p>A machine in <b>Reduced or Permissive security</b> was deliberately downgraded by someone with
+physical access and the admin password. If your case involves a modified system volume, disabled SIP,
+or unsigned kernel extensions, this is the corroborating artifact — and it is on an unencrypted volume
+you can read without any password.</p>
+<p><b>Your own acquisition modified this.</b> You ran <code>csrutil disable</code>
+(<a href="#c1">§1.2</a>), which rewrites LocalPolicy. Compare timestamps against your acquisition
+record before attributing the downgrade to the subject. If the downgrade predates your acquisition, it
+was not you.</p>
+<pre class="sh"><b>find /mnt/preboot/apfs2 -name '*.img4' -printf '%TY-%Tm-%Td %T@ %p\n' | sort -k2 -n</b></pre></div>
+
+<p>Also on Preboot: per-volume boot support files, and <code>var/db/</code> containing volume
+ownership records — which identify the accounts permitted to unlock and boot the machine. An
+unexpected entry there is an account with FileVault unlock rights.</p>
+
+<h3>49.2 Recovery</h3>
+
+<p>recoveryOS changes only when macOS is updated. Enumerate it, note the timestamps, and treat any
+file whose modification time does not correspond to an OS update in <code>install.log</code> as
+requiring an explanation. Persistence installed here survives an erase-and-reinstall of the main
+system, which is exactly why sophisticated actors like it.</p>
+
+<pre class="sh"><b>fsapfsmount -o 524308480 -f 3 /evidence/mbp-001.dd /mnt/recovery</b>
+<b>find /mnt/recovery/apfs3 -type f -printf '%TY-%Tm-%Td %p\n' | sort | tail -30</b>
+<i># cross-check the dates against OS update events</i>
+<b>grep -i 'macOS.*Install\|softwareupdate' /mnt/data/apfs5/private/var/log/install.log | tail</b></pre>
+
+<h2 id="c50"><span class="hn">50</span>The VM volume</h2>
+
+<p>Swap and hibernation. Historically a goldmine of process memory; on modern hardware, much less so —
+but worth ten minutes.</p>
+
+<pre class="sh"><b>fsapfsmount -o 524308480 -f 4 /evidence/mbp-001.dd /mnt/vm</b>
+<b>ls -la /mnt/vm/apfs4/</b>
+-rw------- 1 root root 1073741824 Jul 30 02:11 swapfile0
+-rw------- 1 root root 1073741824 Jul 30 02:38 swapfile1
+-rw------- 1 root root 8589934592 Jul 29 23:04 sleepimage</pre>
+
+<div class="cal caution"><span class="ct">■ CAUTION — SET YOUR EXPECTATIONS CORRECTLY</span>
+<p>macOS encrypts swap by default, and on Apple Silicon the sleepimage is encrypted with a key held in
+the Secure Enclave that is discarded at wake. <b>You will usually find high-entropy noise and nothing
+else.</b> Do not spend a day on it, and do not report "swap was encrypted" as though it were an
+adverse finding — it is the default configuration.</p></div>
+
+<p>What is still worth extracting:</p>
+
+<ul class="tk">
+<li><b>Timestamps and sizes.</b> Swapfile count and modification times indicate memory pressure and
+roughly when the machine was under load. The sleepimage's timestamp is the last time the machine
+hibernated — a reliable "machine was here, doing this, at this time" data point.</li>
+<li><b>Entropy check, cheaply.</b> If entropy is not uniformly high, something is unencrypted and
+worth looking at.</li>
+</ul>
+
+<pre class="sh"><b>ent /mnt/vm/apfs4/swapfile0 | head -3</b>
+Entropy = 7.999812 bits per byte.
+<i># ~8.0 means encrypted or compressed — nothing to extract</i>
+
+<i># if entropy is lower, sweep it properly</i>
+<b>bulk_extractor -o ~/cases/001/05-carve/vm /mnt/vm/apfs4/swapfile0</b>
+<b>strings -n 12 /mnt/vm/apfs4/swapfile0 | grep -iE 'https?://|@|BEGIN (RSA|OPENSSH)' | head</b></pre>

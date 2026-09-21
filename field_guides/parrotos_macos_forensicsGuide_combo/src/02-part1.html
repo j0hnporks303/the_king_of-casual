@@ -1,0 +1,168 @@
+<!-- ============================ PART I ============================ -->
+<section class="partdiv">
+  <div class="pnum">I</div>
+  <h1>Acquisition &amp; Arrival</h1>
+  <div class="blurb">You have already done this part. It is here for completeness, for the report,
+  and because two details of Apple Silicon imaging change what you can expect to find inside the
+  image once it lands on the Parrot box.</div>
+  <div class="toc-mini">
+    <div><span>01</span>Acquisition recap — Recovery, csrutil, imaging, SHA-256</div>
+    <div><span>02</span>Evidence intake on the Parrot workstation</div>
+  </div>
+</section>
+
+<h2 id="c1"><span class="hn">1</span>Acquisition recap</h2>
+
+<p>Kept deliberately short — you have done it. What follows is the shape of the process for the
+record, plus the parts that materially affect analysis.</p>
+
+<h3>1.1 The sequence</h3>
+
+<pre class="sh"><i># --- boot the subject Mac into recoveryOS ---</i>
+<i># Apple Silicon : hold the power button until "Loading startup options"</i>
+<i># Intel/T2      : Cmd-R at chime</i>
+<i># then Utilities &gt; Terminal</i>
+
+<b class="n">csrutil disable</b>            <i># SIP off — needed for raw block access to disk0</i>
+<b class="n">csrutil status</b>             <i># confirm: "System Integrity Protection status: disabled"</i>
+
+<b class="n">diskutil list</b>              <i># identify the physical device, NOT the synthesised container</i>
+
+<i># image the whole physical device to external media</i>
+<b class="n">dd if=/dev/rdisk0 of=/Volumes/EVID/mbp-001.dd bs=8m conv=noerror,sync status=progress</b>
+
+<i># hash source and image, then compare — this is the number that goes in the report</i>
+<b class="n">shasum -a 256 /dev/rdisk0</b>
+<b class="n">shasum -a 256 /Volumes/EVID/mbp-001.dd</b></pre>
+
+<div class="cal note"><span class="ct">● NOTE — WHY /dev/rdisk0</span>
+<p>The <code>r</code> prefix is the raw character device: unbuffered, and on macOS materially faster
+than the buffered <code>/dev/disk0</code>. Use <code>disk0</code>, not <code>disk1s…</code> — you want
+the physical device with its GPT and the entire APFS container, not one synthesised volume. Imaging a
+single volume throws away the container superblocks, the checkpoint area and every other volume,
+which between them are the subject of half this manual.</p></div>
+
+<h3>1.2 Two Apple Silicon facts that shape the whole examination</h3>
+
+<p><b>The internal SSD is always hardware-encrypted, and you cannot image it out of the machine.</b>
+On T2 and Apple Silicon Macs the NVMe is encrypted at rest with a key held in the Secure Enclave. Desolder
+the chip or pull it into a write-blocker and you get noise. The only way to a usable image is to read
+the block device from a booted recoveryOS on <em>that specific machine</em>, where the SEP transparently
+decrypts on the read path. This is why the acquisition is done the way it is, and it is worth a
+sentence in your report — it explains why the image was not taken with a hardware write-blocker.</p>
+
+<p><b>FileVault is a second, software layer on top of that.</b> Because the SEP layer is transparent,
+what lands in your <code>.dd</code> is a normal-looking APFS container — but the Data volume inside it
+is still encrypted by FileVault at the APFS level, with the keys wrapped in the container's keybags.
+That is the layer you will be unwrapping with the user password in <a href="#c9">§9</a>. It is also why
+running <code>strings</code> across the raw image returns almost nothing useful until you unlock.</p>
+
+<div class="cal devil"><span class="ct">▲ DEVIL — DISABLING SIP TOUCHES THE MACHINE</span>
+<p><code>csrutil disable</code> writes to NVRAM and, on Apple Silicon, alters the LocalPolicy on the
+Preboot volume — which means the act of acquisition left artifacts on the evidence. This is expected
+and defensible, but you must be able to point at it and say <em>that was me, at that time</em>.
+Note the exact time you disabled SIP; when you later analyse the Preboot volume (<a href="#c49">§49</a>)
+and the unified log, your own footprints will be sitting there. Examiners have mistaken their own
+LocalPolicy modification for attacker activity more than once.</p></div>
+
+<h3>1.3 What you should also have captured</h3>
+
+<p>If the whole physical device was imaged, you have all of these already. Confirm:</p>
+
+<ul class="tk">
+<li><b>The complete APFS container</b> — all volumes, not just Data. Preboot and Recovery matter
+(<a href="#c49">§49</a>); the VM volume matters (<a href="#c50">§50</a>).</li>
+<li><b>Any secondary internal device</b> — on a Fusion setup, the SSD tier and the HDD tier form one
+logical container and are useless apart.</li>
+<li><b>A photograph or note of the machine state</b> — powered on or off, lid, connected peripherals,
+whether FileVault was already unlocked.</li>
+</ul>
+
+<div class="cal caution"><span class="ct">■ CAUTION — WHAT DEAD-BOX COSTS YOU</span>
+<p>A powered-off acquisition permanently forfeits: RAM (and with it running malware, injected code,
+and the unwrapped volume key), the contents of <code>/private/var/folders</code> per-boot temporary
+directories, established network connections, and anything that lived only in a running process.
+If the machine was live and you shut it down, say so plainly in the report — that decision is
+frequently the single largest gap in an examination. <a href="#c59">§59</a> covers what this image
+genuinely cannot answer.</p></div>
+
+<h2 id="c2"><span class="hn">2</span>Evidence intake on the Parrot workstation</h2>
+
+<p>The image has arrived on the analysis box. Before anything touches it, three things happen:
+verify, immobilise, and record.</p>
+
+<h3>2.1 Re-verify the hash</h3>
+
+<p>The hash you compare against is the one taken on the subject machine. Transfer corrupts; drives
+fail silently; USB enclosures lie. Verify on arrival, and record that you did.</p>
+
+<pre class="sh"><i># Parrot side — must match the shasum -a 256 taken during acquisition</i>
+<b>sha256sum /evidence/mbp-001.dd | tee /evidence/mbp-001.dd.sha256</b>
+c3f1...9ab2  /evidence/mbp-001.dd
+
+<i># if you have the acquisition hash in a file, verify mechanically rather than by eye</i>
+<b>sha256sum -c /evidence/mbp-001.dd.sha256</b>
+/evidence/mbp-001.dd: OK</pre>
+
+<div class="cal tip"><span class="ct">▸ TIP — HASH ONCE, IN PARALLEL</span>
+<p>A single pass over a 1&nbsp;TB image costs real time. Compute every digest you will ever want in
+one read rather than three:</p>
+<pre class="sh"><b>tee &lt; /evidence/mbp-001.dd \
+  &gt;(sha256sum &gt; sha256.txt) \
+  &gt;(sha1sum   &gt; sha1.txt) \
+  &gt;(md5sum    &gt; md5.txt) &gt; /dev/null</b></pre>
+<p>MD5 and SHA-1 are there only because opposing counsel, older tools and NSRL hash sets still speak
+them. SHA-256 is the number that matters.</p></div>
+
+<h3>2.2 Immobilise the original</h3>
+
+<p>The raw image is now the evidence master. It should never be written to again, and the operating
+system should be structurally incapable of doing so.</p>
+
+<pre class="sh"><i># strip write permission from everything, including you</i>
+<b class="r">chmod 0444 /evidence/mbp-001.dd</b>
+<b class="r">chattr +i /evidence/mbp-001.dd</b>        <i># immutable — even root cannot write without -i</i>
+<b>lsattr /evidence/mbp-001.dd</b>
+----i---------e------- /evidence/mbp-001.dd</pre>
+
+<div class="cal note"><span class="ct">● NOTE</span>
+<p><code>chattr +i</code> needs an ext2/3/4, XFS or btrfs filesystem underneath. If your evidence
+store is exFAT or NTFS — common on shared external drives — the flag will fail and you are relying on
+permissions and discipline alone. Consider that a reason to keep evidence on a native Linux filesystem.</p></div>
+
+<h3>2.3 Consider a forensic container format</h3>
+
+<p>Raw <code>.dd</code> is universally readable and that is its whole virtue. But an E01/EWF container
+carries its own hashes, compresses well (an APFS image of a half-empty SSD compresses hard), and
+records case metadata inside the evidence file itself. Every tool in this manual can read it through
+<code>ewfmount</code>.</p>
+
+<pre class="sh"><i># convert raw to E01 with embedded metadata and verification</i>
+<b>ewfacquire -t /evidence/mbp-001 -f encase6 -c deflate:best -S 2G \
+    -C "CASE-001" -D "MacBook Pro 14 M2 internal NVMe" \
+    -E "1" -e "J. Examiner" -N "Dead-box image, FileVault2 active" \
+    -d sha256 /evidence/mbp-001.dd</b>
+
+<i># verify the container against its own stored digests</i>
+<b>ewfverify /evidence/mbp-001.E01</b>
+Verification completed... MD5 hash stored in file: ... (MATCH)</pre>
+
+<p>To use it, expose it as a flat file and treat that path as the image everywhere else in this manual:</p>
+
+<pre class="sh"><b class="r">mkdir -p /mnt/ewf &amp;&amp; ewfmount /evidence/mbp-001.E01 /mnt/ewf</b>
+<b>ls -l /mnt/ewf/</b>
+-r--r--r-- 1 root root 494384795648 Jan  1  1970 ewf1
+<i># /mnt/ewf/ewf1 is now a read-only raw image</i></pre>
+
+<h3>2.4 Work from a copy, or don't work at all</h3>
+
+<p>Analysis happens against a working copy, or against the master through a read-only loop device and
+a copy-on-write overlay (<a href="#c4">§4</a>). Never directly. Disk is cheap; a contaminated master
+is a dead case.</p>
+
+<div class="kv">
+<b>/evidence/</b><span>read-only master image, immutable, hashed. Mounted <code>ro</code> if on its own volume.</span>
+<b>~/cases/001/work/</b><span>working copy or COW overlay — where mistakes are allowed to happen</span>
+<b>~/cases/001/out/</b><span>everything your tools produce</span>
+<b>~/cases/001/notes/</b><span>contemporaneous notes and session transcripts</span>
+</div>

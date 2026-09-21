@@ -1,0 +1,2227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bash Scripting — hollowhacker</title>
+<style>
+/* ============================================================================
+   HOLLOWHACKER  —  note stylesheet
+   Derived from: no single source card — an original third skin, built from
+   the shared class contract of nightwave.css / retrograde.css, borrowing
+   their construction techniques (inline-SVG deco, gradient sweeps/orbs,
+   fixed-layer per-page repaint) and pointed at 1990s hacker-terminal tropes
+   instead of a business card: phosphor-green CRT glow, scanlines, circuit
+   traces routed like PCB copper, an amber/red LED alert pair, and a
+   root-prompt wordmark treatment.
+
+   Pair with: nightwave.css, retrograde.css — SAME class contract, different
+   skin. Swap the <link> and the exact same HTML re-skins.
+   Print target: A4 / Letter via headless Chrome ("print to PDF").
+   ========================================================================= */
+
+/* ---------------------------------------------------------------- TOKENS -- */
+:root {
+  /* --- surfaces --- */
+  --bg:        #030B06;   /* CRT black, faint green tint */
+  --bg-2:      #0A1F12;   /* raised panel */
+  --bg-3:      #0F2A16;   /* table stripe / inset */
+  --line:      #1E4B27;   /* hairline borders */
+  --line-soft: #143318;
+
+  /* --- accents --- */
+  --green:     #39FF6A;   /* primary phosphor */
+  --green-hot: #6BFF95;   /* brightest, for the loudest callout */
+  --green-dp:  #145C2C;   /* deep green, ribbon lines */
+  --amber:     #FFB000;   /* dual-phosphor amber, the trick/tip hue */
+  --red:       #FF4D4D;   /* intrusion-alert red, the trap/warn hue */
+  --cyan:      #2BE6C4;   /* secondary phosphor, context hue */
+  --lime:      #C6FF6B;   /* yellow-green, worked-example hue */
+  --violet:    #B98CFF;   /* ADDED — debug-LED purple, no green/amber/red terminal has a self-test hue on its own */
+
+  /* --- text --- */
+  --text:      #D9FFE0;   /* soft green-white, not #FFF: less halation on black */
+  --text-2:    #9FD9AC;
+  --text-3:    #6B9A76;
+  --on-accent: #04100A;
+
+  /* --- the signature sweep (a scanner beam, deep green to alert amber) --- */
+  --sweep: linear-gradient(90deg, #145C2C 0%, #39FF6A 45%, #C6FF6B 72%, #FFB000 100%);
+  /* --- the orb (an LED blip, bright core to deep green rim) --- */
+  --orb: linear-gradient(180deg, #DFFFB0 0%, #39FF6A 45%, #0E4A1C 100%);
+
+  /* --- type --- */
+  /* Offline stacks — no webfont requests. A terminal face is authentically a
+     monospace face, so both display and body run on the system mono stack.
+     Add @import url('https://fonts.googleapis.com/css2?family=VT323') and put
+     'VT323' at the front of --font-display for a period-correct bitmap look,
+     at the cost of a network request. */
+  --font-display: 'JetBrains Mono', 'Courier New', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font-body:    'Courier New', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font-mono:    ui-monospace, 'SF Mono', Menlo, Monaco, Consolas, monospace;
+  --measure:      64ch;   /* monospace runs wider per character than the other two skins */
+
+  /* --- rhythm --- */
+  --gap:    1.15rem;
+  --radius: 10px;         /* sharper than the other skins — a terminal window, not a card */
+  --radius-sm: 6px;
+}
+
+/* ------------------------------------------------------------ PAGE SETUP -- */
+@page { size: A4; margin: 0; }
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  color: var(--text);
+  background-color: var(--bg);
+}
+
+body {
+  font-family: var(--font-body);
+  font-size: 11pt;
+  line-height: 1.7;
+  font-weight: 400;
+  text-align: left;
+  -webkit-font-smoothing: antialiased;
+
+  /* the phosphor bloom, painted across every page of the PDF */
+  background-image: radial-gradient(60% 40% at 50% 0%, rgba(57,255,106,.12) 0%, rgba(3,11,6,0) 70%);
+  background-attachment: fixed;
+}
+
+.page {
+  position: relative;
+  z-index: 1;
+  max-width: 210mm;
+  margin: 0 auto;
+  padding: 22mm 24mm 26mm;
+}
+
+/* ------------------------------------------------------- DECORATIVE LAYER --
+   <div class="deco" aria-hidden="true"></div> as the first child of <body>.
+   position:fixed makes Chrome repaint it on EVERY page of the PDF.
+   -------------------------------------------------------------------------- */
+.deco {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+
+  background-image:
+    /* left circuit trace, routed like PCB copper */
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='320' height='1000' viewBox='0 0 320 1000'%3E%3Cdefs%3E%3ClinearGradient id='hg' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%23145C2C'/%3E%3Cstop offset='0.5' stop-color='%2333C766'/%3E%3Cstop offset='1' stop-color='%238CFFAE'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cg fill='none' stroke='url(%23hg)' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M50 0 L50 140 L92 140 L92 320 L58 320 L58 520 L100 520 L100 720 L68 720 L68 1000'/%3E%3Cpath d='M84 0 L84 200 L44 200 L44 380 L96 380 L96 580 L52 580 L52 780 L96 780 L96 1000'/%3E%3Cpath d='M120 0 L120 110 L152 110 L152 300 L108 300 L108 480 L160 480 L160 680 L128 680 L128 1000'/%3E%3Cpath d='M156 0 L156 250 L188 250 L188 440 L144 440 L144 620 L196 620 L196 850 L164 850 L164 1000'/%3E%3C/g%3E%3Cg fill='%238CFFAE' opacity='0.85'%3E%3Ccircle cx='92' cy='140' r='3.2'/%3E%3Ccircle cx='58' cy='320' r='3.2'/%3E%3Ccircle cx='100' cy='520' r='3.2'/%3E%3Ccircle cx='68' cy='720' r='3.2'/%3E%3Ccircle cx='44' cy='200' r='3.2'/%3E%3Ccircle cx='96' cy='380' r='3.2'/%3E%3Ccircle cx='52' cy='580' r='3.2'/%3E%3Ccircle cx='96' cy='780' r='3.2'/%3E%3C/g%3E%3C/svg%3E"),
+    /* right circuit trace — same art, mirrored + gradient reversed */
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='320' height='1000' viewBox='0 0 320 1000'%3E%3Cdefs%3E%3ClinearGradient id='hg2' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%238CFFAE'/%3E%3Cstop offset='0.5' stop-color='%2333C766'/%3E%3Cstop offset='1' stop-color='%23145C2C'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cg fill='none' stroke='url(%23hg2)' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round' transform='translate(320,0) scale(-1,1)'%3E%3Cpath d='M50 0 L50 140 L92 140 L92 320 L58 320 L58 520 L100 520 L100 720 L68 720 L68 1000'/%3E%3Cpath d='M84 0 L84 200 L44 200 L44 380 L96 380 L96 580 L52 580 L52 780 L96 780 L96 1000'/%3E%3Cpath d='M120 0 L120 110 L152 110 L152 300 L108 300 L108 480 L160 480 L160 680 L128 680 L128 1000'/%3E%3Cpath d='M156 0 L156 250 L188 250 L188 440 L144 440 L144 620 L196 620 L196 850 L164 850 L164 1000'/%3E%3C/g%3E%3Cg fill='%238CFFAE' opacity='0.85' transform='translate(320,0) scale(-1,1)'%3E%3Ccircle cx='92' cy='140' r='3.2'/%3E%3Ccircle cx='58' cy='320' r='3.2'/%3E%3Ccircle cx='100' cy='520' r='3.2'/%3E%3Ccircle cx='68' cy='720' r='3.2'/%3E%3Ccircle cx='44' cy='200' r='3.2'/%3E%3Ccircle cx='96' cy='380' r='3.2'/%3E%3Ccircle cx='52' cy='580' r='3.2'/%3E%3Ccircle cx='96' cy='780' r='3.2'/%3E%3C/g%3E%3C/svg%3E"),
+    /* CRT scanlines */
+    repeating-linear-gradient(0deg, rgba(120,255,160,.055) 0 1px, transparent 1px 3px),
+    /* faint data-column grain */
+    repeating-linear-gradient(90deg, rgba(120,255,160,.02) 0 1px, transparent 1px 7px);
+
+  background-repeat: no-repeat, no-repeat, repeat, repeat;
+  /* The traces live in the page MARGINS and bleed off the edge, so they never
+     run under the text column. Sized in mm so print and screen agree. */
+  background-position: -20mm top, calc(100% + 20mm) top, 0 0, 0 0;
+  background-size: 40mm 100%, 40mm 100%, auto, auto;
+  opacity: .85;
+}
+
+/* Corner status LEDs. Optional extra children of .deco. */
+.deco::before,
+.deco::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  background: var(--orb);
+  box-shadow: 0 0 12px 2px rgba(57,255,106,.55);
+}
+.deco::before { width: 10mm; height: 10mm; top: 6%;    left: 4mm; }
+.deco::after  { width: 13mm; height: 13mm; bottom: 4%; right: 3mm; }
+
+/* Drop-in LED, echoing the corner status lights: <i class="blip"></i> */
+.blip {
+  display: inline-block;
+  width: 1em; height: 1em;
+  vertical-align: -.14em;
+  border-radius: 50%;
+  background: var(--orb);
+  box-shadow: 0 0 6px 1px rgba(57,255,106,.6);
+}
+
+/* ---------------------------------------------------------- MASTHEAD ------ */
+.masthead { margin-bottom: 2.2rem; }
+
+.eyebrow {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: .68rem;
+  letter-spacing: .2em;
+  text-transform: uppercase;
+  color: var(--cyan);
+  margin: 0 0 .6rem;
+}
+
+/* The root-prompt prefix, echoing a shell you've just logged into */
+.eyebrow::before {
+  content: "root@notes:~$ ";
+  color: var(--green);
+  font-weight: 700;
+}
+.eyebrow::after {
+  content: "";
+  display: inline-block;
+  width: .55em; height: 1em;
+  margin-left: .5em;
+  background: var(--green);
+  vertical-align: -.16em;
+  box-shadow: 0 0 6px 1px rgba(57,255,106,.7);
+}
+
+h1 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 2.4rem;
+  line-height: 1.1;
+  letter-spacing: .02em;
+  text-transform: uppercase;
+  margin: 0 0 .7rem;
+  color: #EAFFF0;
+  text-shadow: 0 0 2px rgba(57,255,106,.85), 0 0 22px rgba(57,255,106,.4);
+}
+
+.lede {
+  font-size: 1.02rem;
+  line-height: 1.55;
+  color: var(--text-2);
+  max-width: var(--measure);
+  margin: 0 0 .8rem;
+}
+
+.meta {
+  font-family: var(--font-mono);
+  font-size: .76rem;
+  letter-spacing: .04em;
+  color: var(--text-3);
+  margin: 0;
+}
+.meta::before { content: "# "; color: var(--green-dp); }
+
+/* ---------------------------------------------------------- HEADINGS ------ */
+h2, h3, h4 {
+  font-family: var(--font-display);
+  color: #EAFFF0;
+  margin: 2.3rem 0 .75rem;
+  break-after: avoid;
+  page-break-after: avoid;
+}
+
+h2 {
+  font-weight: 700;
+  font-size: 1.3rem;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+  padding-bottom: .55rem;
+  border-bottom: 1px solid var(--line);
+  position: relative;
+}
+/* the signature sweep, riding the underline of every h2 */
+h2::after {
+  content: "";
+  position: absolute;
+  left: 0; bottom: -1px;
+  width: 4.5rem; height: 2px;
+  background: var(--sweep);
+  border-radius: 2px;
+}
+
+h3 {
+  font-weight: 600;
+  font-size: 1.04rem;
+  color: var(--cyan);
+  margin-top: 1.8rem;
+}
+
+h4 {
+  font-weight: 600;
+  font-size: .8rem;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--amber);
+  margin-top: 1.5rem;
+}
+
+/* Optional auto-numbering: <main class="page numbered"> */
+.numbered { counter-reset: h2; }
+.numbered h2 { counter-increment: h2; counter-reset: h3; }
+.numbered h2::before {
+  content: "[" counter(h2) "] ";
+  color: var(--green);
+  margin-right: .3rem;
+  font-family: var(--font-mono);
+}
+.numbered h3 { counter-increment: h3; }
+.numbered h3::before {
+  content: counter(h2) "." counter(h3) "  ";
+  color: var(--amber);
+  font-family: var(--font-mono);
+  font-size: .85em;
+}
+
+/* ------------------------------------------------------------- TEXT ------- */
+p { margin: 0 0 var(--gap); max-width: var(--measure); }
+
+strong { color: #fff; font-weight: 700; }
+em     { color: var(--cyan); font-style: italic; }
+
+a {
+  color: var(--cyan);
+  text-decoration: none;
+  border-bottom: 1px solid rgba(43,230,196,.4);
+}
+
+/* A real highlighter: a translucent block over the whole inline box.
+   A thin band gets sliced by the glyphs at this line-height. */
+mark {
+  background: rgba(57,255,106,.28);
+  color: #fff;
+  padding: .12em .3em;
+  border-radius: 3px;
+  -webkit-box-decoration-break: clone;
+          box-decoration-break: clone;
+}
+
+/* A key term, inline: <b class="term">mitochondria</b> */
+.term {
+  font-weight: 700;
+  color: var(--amber);
+  border-bottom: 1px dotted rgba(255,176,0,.55);
+}
+
+small, .small { font-size: .82rem; color: var(--text-3); }
+
+/* ------------------------------------------------------------- RULES ------ */
+hr.rule {
+  border: 0;
+  height: 2px;
+  margin: 2rem 0;
+  background: var(--sweep);
+  border-radius: 2px;
+  opacity: .9;
+}
+hr.rule--soft { background: var(--line); height: 1px; opacity: 1; }
+
+/* ------------------------------------------------------------- LISTS ------ */
+ul, ol { margin: 0 0 var(--gap); padding-left: 1.5rem; max-width: var(--measure); }
+li { margin-bottom: .45rem; }
+
+ul { list-style: none; padding-left: 1.4rem; }
+ul li { position: relative; }
+ul li::before {
+  content: "\203A";
+  position: absolute;
+  left: -1.05rem; top: -.05em;
+  color: var(--green);
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+ul ul li::before { content: "\00B7"; color: var(--amber); }
+
+ol { list-style: none; counter-reset: ol; padding-left: 1.9rem; }
+ol li { counter-increment: ol; position: relative; }
+ol li::before {
+  content: counter(ol);
+  position: absolute;
+  left: -1.9rem; top: .18em;
+  width: 1.35rem;
+  font-family: var(--font-mono);
+  font-size: .78rem;
+  font-weight: 700;
+  text-align: right;
+  color: var(--cyan);
+}
+
+/* Numbered steps, heavier treatment: <ol class="steps"> */
+.steps { counter-reset: st; padding-left: 0; list-style: none; max-width: var(--measure); }
+.steps > li {
+  counter-increment: st;
+  position: relative;
+  padding: .1rem 0 1.1rem 3rem;
+  border-left: 1px solid var(--line);
+  margin-left: 1rem;
+}
+.steps > li:last-child { border-left-color: transparent; padding-bottom: 0; }
+.steps > li::before {
+  content: counter(st);
+  position: absolute;
+  left: -1rem; top: 0;
+  width: 2rem; height: 2rem;
+  display: grid; place-items: center;
+  border-radius: 50%;
+  background: var(--orb);
+  color: var(--on-accent);
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: .85rem;
+  text-align: center;
+  box-shadow: 0 0 8px 1px rgba(57,255,106,.5);
+}
+
+/* Checklist: <ul class="check"> */
+.check { padding-left: 0; }
+.check li { padding-left: 2rem; }
+.check li::before {
+  content: "";
+  position: absolute;
+  left: 0; top: .34em;
+  width: 15px; height: 15px;
+  border-radius: 3px;
+  border: 1.5px solid var(--cyan);
+  background: transparent;
+}
+.check li.done { color: var(--text-3); }
+.check li.done::before {
+  background: var(--orb);
+  border-color: transparent;
+}
+
+/* --------------------------------------------------------- CALLOUTS ------- *
+   <div class="note note--key">
+     <p class="note__label">Key idea</p>
+     <p>…</p>
+   </div>
+   Variants: key · info · tip · warn · example · recall
+   Each has its own hue AND its own label, so the KIND of information is
+   identifiable before you read a word of it.
+   -------------------------------------------------------------------------- */
+.note {
+  --note: var(--green);
+  position: relative;
+  margin: 1.5rem 0;
+  padding: 1rem 1.2rem 1rem 1.35rem;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--note);
+  border-radius: var(--radius-sm);
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+.note > :last-child { margin-bottom: 0; }
+.note p { max-width: none; }
+
+.note__label {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: .66rem;
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  color: var(--note);
+  margin: 0 0 .45rem;
+}
+.note__label::before {
+  content: "";
+  display: inline-block;
+  width: .5em; height: .5em;
+  margin-right: .6em;
+  border-radius: 2px;
+  background: var(--note);
+  vertical-align: .05em;
+  box-shadow: 0 0 5px 1px color-mix(in srgb, var(--note) 70%, transparent);
+}
+
+.note--key     { --note: var(--green-hot); }
+.note--info    { --note: var(--cyan); }
+.note--tip     { --note: var(--amber); }
+.note--warn    { --note: var(--red); }
+.note--example { --note: var(--lime); }
+.note--recall  { --note: var(--violet); }
+
+/* The loudest one — for the single thing on the page you must not forget */
+.note--key {
+  background:
+    linear-gradient(180deg, rgba(107,255,149,.14), rgba(107,255,149,.02)),
+    var(--bg-2);
+}
+
+/* ------------------------------------------------------- DEFINITION LIST -- */
+.defs { margin: 1.4rem 0; }
+.defs dt {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: .95rem;
+  color: var(--amber);
+  margin-top: 1rem;
+}
+.defs dd {
+  margin: .25rem 0 0;
+  padding-left: 1rem;
+  border-left: 2px solid var(--line);
+  color: var(--text-2);
+  max-width: var(--measure);
+}
+
+/* ------------------------------------------------------------- CARDS ------ */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+.card {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1.1rem 1.2rem;
+  break-inside: avoid;
+  page-break-inside: avoid;
+  position: relative;
+  overflow: hidden;
+}
+.card::before {                       /* the sweep, capping each card like a terminal titlebar */
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: var(--sweep);
+}
+.card h3 { margin-top: 0; }
+.card > :last-child { margin-bottom: 0; }
+.card p { max-width: none; }
+
+/* Two columns of running text: <div class="cols"> */
+.cols { column-count: 2; column-gap: 1.8rem; margin: 1.4rem 0; }
+.cols p { max-width: none; }
+
+/* ------------------------------------------------------------- STATS ------ */
+.stat {
+  display: inline-block;
+  margin: 0 1.6rem 1rem 0;
+  break-inside: avoid;
+}
+.stat__num {
+  display: block;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 2.6rem;
+  line-height: 1;
+  background: var(--orb);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.stat__label {
+  display: block;
+  font-size: .74rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  margin-top: .3rem;
+}
+
+/* ------------------------------------------------------------- TABLE ------ */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.5rem 0;
+  font-size: .92rem;
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+thead th {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: .68rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  text-align: left;
+  color: var(--amber);
+  padding: .55rem .8rem;
+  border-bottom: 2px solid var(--green);
+}
+tbody td {
+  padding: .6rem .8rem;
+  border-bottom: 1px solid var(--line-soft);
+  vertical-align: top;
+}
+tbody tr:nth-child(even) { background: rgba(57,255,106,.035); }
+tbody tr:last-child td { border-bottom: 0; }
+
+/* -------------------------------------------------------- QUOTE / CODE ---- */
+blockquote {
+  margin: 1.6rem 0;
+  padding: .3rem 0 .3rem 1.4rem;
+  border-left: 3px solid transparent;
+  border-image: var(--sweep) 1;
+  font-size: 1.02rem;
+  color: var(--text-2);
+  break-inside: avoid;
+}
+blockquote p { font-style: italic; }
+blockquote cite {
+  display: block;
+  font-style: normal;
+  font-size: .78rem;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: .86em;
+  background: var(--bg-3);
+  color: var(--green);
+  padding: .12em .42em;
+  border-radius: 4px;
+  border: 1px solid var(--line-soft);
+}
+pre {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--green);
+  border-radius: var(--radius-sm);
+  padding: 1rem 1.1rem;
+  overflow-x: auto;
+  margin: 1.4rem 0;
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--text);
+  font-size: .82rem;
+  line-height: 1.6;
+}
+
+kbd {
+  font-family: var(--font-mono);
+  font-size: .76em;
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  padding: .12em .45em;
+  color: var(--text);
+}
+
+/* -------------------------------------------------------------- TAGS ------ */
+.tags { display: flex; flex-wrap: wrap; gap: .45rem; padding: 0; max-width: none; }
+.tag {
+  font-family: var(--font-display);
+  font-size: .64rem;
+  font-weight: 600;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  padding: .28em .75em;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  color: var(--text-2);
+}
+.tag--hot { border-color: transparent; background: var(--orb); color: var(--on-accent); }
+
+/* --------------------------------------------------- CONTACT / FOOTER ----- *
+   <ul class="rows"><li><span class="rows__ico"></span>…</li></ul>
+   -------------------------------------------------------------------------- */
+.rows { list-style: none; padding: 0; margin: 1.4rem 0; }
+.rows li {
+  display: flex;
+  align-items: center;
+  gap: .8rem;
+  padding: .55rem 0;
+  font-weight: 500;
+  border-bottom: 2px solid transparent;
+  border-image: var(--sweep) 1;
+}
+.rows li::before { content: none; }
+.rows__ico {
+  flex: 0 0 auto;
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  background: var(--orb);
+  box-shadow: 0 0 6px 1px rgba(57,255,106,.5);
+}
+
+/* ------------------------------------------------------- PAGE CONTROL ----- */
+.break       { break-before: page; page-break-before: always; height: 0; }
+.keep        { break-inside: avoid; page-break-inside: avoid; }
+.no-deco .deco { display: none; }
+
+/* -------------------------------------------------------- PAPER VARIANT ---
+   <html class="paper"> — same layout, light background.
+   Dark full-bleed pages are gorgeous on screen and brutal on a printer.
+   -------------------------------------------------------------------------- */
+html.paper, html.paper body { background-image: none; }
+html.paper {
+  --bg: #F4FBF2;
+  --bg-2: #E9F5E6;
+  --bg-3: #DFF0DC;
+  --line: #BFE0C0;
+  --line-soft: #D3ECD2;
+  --text: #0C2A12;
+  --text-2: #2F5B36;
+  --text-3: #5C8563;
+  --green: #1C9C43;
+  --green-hot: #137A34;
+  --amber: #B5790A;
+  --red: #C23B2E;
+  --cyan: #0E8C79;
+  --lime: #5C9A1E;
+  --violet: #6B4FC4;
+  --on-accent: #FFFFFF;
+}
+html.paper h1, html.paper h2, html.paper h3, html.paper h4 { color: #0C2A12; text-shadow: none; }
+html.paper h3 { color: var(--cyan); }
+html.paper h4 { color: var(--amber); }
+html.paper strong { color: #000; }
+html.paper .eyebrow::after { box-shadow: none; }
+html.paper .deco { opacity: .2; }
+html.paper .deco::before, html.paper .deco::after { box-shadow: none; opacity: .5; }
+html.paper mark { background: linear-gradient(180deg, transparent 58%, rgba(28,156,67,.28) 58%); color: inherit; }
+html.paper .stat__num { color: var(--green-hot); background: none; -webkit-text-fill-color: currentColor; }
+
+/* ------------------------------------------------------------- PRINT ------ */
+@media print {
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+  body { font-size: 10.5pt; }
+  .page { padding: 20mm 22mm; }
+  a { border-bottom: 0; }
+  h2, h3, h4 { break-after: avoid; page-break-after: avoid; }
+  p, li { orphans: 3; widows: 3; }
+}
+
+/* ------------------------------------------------------------ ON SCREEN --- */
+@media screen and (max-width: 680px) {
+  .page  { padding: 7vw 6vw; }
+  .cols  { column-count: 1; }
+  h1     { font-size: 1.85rem; }
+  .deco  { background-size: 24mm 100%, 24mm 100%, auto, auto; opacity: .5;
+           background-position: -14mm top, calc(100% + 14mm) top, 0 0, 0 0; }
+  .deco::before, .deco::after { display: none; }
+}
+
+/* ---- document-local overrides (the shared sheet is untouched) ---- */
+
+/* The preamble section sits outside the author's 1..26 numbering. */
+h2.h2--plain { counter-increment: none; }
+.numbered h2.h2--plain::before { content: none; }
+
+/* WHOLE-PIXEL TYPE SIZES.
+   Chrome's PDF writer emits a line of text as one text run only when the font
+   size lands on a whole pixel; at fractional sizes it falls back to placing
+   every glyph individually, which is what makes copied text come apart
+   (identifiers splitting at "_", lost words, failed search). The theme's sizes
+   are in rem, so almost all of them land fractionally - these restate the same
+   scale in whole pixels. Nothing here changes the design, only the rounding. */
+.eyebrow { font-size: 11px; }
+h1 { font-size: 38px; }
+.lede { font-size: 16px; }
+.meta { font-size: 12px; }
+h2 { font-size: 21px; }
+h3 { font-size: 17px; }
+h4 { font-size: 13px; }
+.numbered h3::before { font-size: 14px; }
+small, .small { font-size: 13px; }
+ol li::before { font-size: 12px; }
+.steps > li::before { font-size: 14px; }
+.note__label { font-size: 11px; }
+table { font-size: 15px; }
+thead th { font-size: 11px; }
+blockquote { font-size: 16px; }
+blockquote cite { font-size: 12px; }
+code { font-size: 13px; }
+kbd { font-size: 11px; }
+.tag { font-size: 10px; }
+
+/* The title's phosphor glow was a text-shadow, which Chrome prints by drawing
+   the words once per shadow - the title came out of the PDF three times over.
+   Same halo, painted as a blurred layer behind the text instead. */
+h1 { text-shadow: none; position: relative; isolation: isolate; }
+h1::before {
+  content: "";
+  position: absolute;
+  inset: -14% -6%;
+  z-index: -1;
+  background: radial-gradient(52% 120% at 26% 52%, rgba(57,255,106,.34) 0%,
+                              rgba(57,255,106,.10) 46%, rgba(3,11,6,0) 72%);
+  filter: blur(5px);
+}
+
+/* Code blocks are fitted to the column instead of being clipped by
+   `pre { overflow-x: auto }`, which in print simply cuts the line off.
+   Only listings wider than 81 characters are stepped down. */
+@media print {
+  pre code { font-size: 12px; }
+  pre[data-cols="82"] code { font-size: 11px; }
+  pre[data-cols="83"] code { font-size: 11px; }
+  pre[data-cols="87"] code { font-size: 11px; }
+  pre[data-cols="95"] code { font-size: 10px; }
+}
+
+/* PHOSPHOR GLOWS.
+   Chrome's print rasteriser does not blur these box-shadows - it lays down the
+   shadow's box as a flat rectangle, so every glowing round element printed as a
+   pale SQUARE with a circle inside it. The glows are rebuilt as radial
+   gradients, which print as intended, or dropped where the element reads fine
+   without one. Screen rendering is unchanged in kind, only in technique. */
+.deco::before, .deco::after {
+  box-shadow: none;
+  border-radius: 0;
+  background: radial-gradient(closest-side circle at 50% 50%,
+              #DFFFB0 0%, #39FF6A 30%, #1E7A33 46%, rgba(57,255,106,.34) 54%,
+              rgba(57,255,106,.10) 72%, rgba(57,255,106,0) 100%);
+}
+.deco::before { width: 15mm; height: 15mm; }
+.deco::after  { width: 19mm; height: 19mm; }
+
+.note__label::before { box-shadow: none; }
+.rows__ico { box-shadow: none; }
+
+/* Code spans inside table cells shouldn't force a cell wider than its share. */
+td code { white-space: nowrap; }
+
+</style>
+</head>
+<body>
+<div class="deco" aria-hidden="true"></div>
+
+<main class="page numbered">
+
+  <header class="masthead">
+    <p class="eyebrow">Field guide &middot; A Practical Syntax Guide</p>
+    <h1>Bash Scripting</h1>
+    <p class="lede">This guide is a reference for writing and reading Bash (<code>.sh</code>) scripts. It explains the language in small pieces, then ends with examples that combine those pieces. The examples are deliberately fragments rather than complete script skeletons.</p>
+    <p class="meta">26 sections &middot; Bash 3.2 &ndash; 5.4 &middot; typeset 20 Sep 2026 from bash-scripting-guide.md</p>
+  </header>
+
+  <p class="tags">
+    <span class="tag tag--hot">Bash</span>
+    <span class="tag">Shell</span>
+    <span class="tag">Syntax reference</span>
+    <span class="tag">Not sh</span>
+  </p>
+
+  <div class="note note--key">
+    <p class="note__label">Key idea</p>
+    <p><strong>Bash is not the same as <code>sh</code>.</strong> Features such as <code>[[ ... ]]</code>, arrays, <code>(( ... ))</code>, process substitution, <code>mapfile</code>, and <code>declare</code> are Bash-specific. If a script uses them, run it with Bash rather than assuming <code>/bin/sh</code> supports them.</p>
+  </div>
+
+  <hr class="rule">
+
+  <h2 class="h2--plain">Before you begin: Bash versions matter</h2>
+
+  <p>Check the interpreter you will actually use:</p>
+
+  <pre><code>bash --version
+/usr/bin/env bash --version</code></pre>
+
+  <p>Some syntax in this guide requires a newer Bash release:</p>
+
+  <table>
+      <thead>
+        <tr><th>Bash version</th><th>Features from this guide available by that version</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>3.2</td><td>Indexed arrays, <code>[[ ... ]]</code>, <code>=~</code>, arithmetic, and process substitution</td></tr>
+        <tr><td>4.0+</td><td>Associative arrays, <code>mapfile</code>, <code>coproc</code>, <code>globstar</code>, <code>&amp;&gt;&gt;</code>, <code>|&amp;</code>, and <code>^^</code>/<code>,,</code> case conversion</td></tr>
+        <tr><td>4.2+</td><td>The <code>[[ -v variable ]]</code> existence test</td></tr>
+        <tr><td>4.3+</td><td>Name references with <code>declare -n</code></td></tr>
+        <tr><td>4.4+</td><td><code>${value@Q}</code>-style transformations and <code>mapfile -d</code></td></tr>
+      </tbody>
+    </table>
+
+  <div class="note note--info">
+    <p class="note__label">Context</p>
+    <p>The system-provided Bash on many Macs is 3.2, so examples using the later features require a separately installed newer Bash. A script always gets the version selected by its shebang or invocation; your interactive shell version does not change that.</p>
+  </div>
+
+  <h2>Running Bash code</h2>
+
+  <h3>The shebang</h3>
+
+  <p>The first line can tell the operating system which interpreter to use when the file is executed directly:</p>
+
+  <pre><code>#!/usr/bin/env bash</code></pre>
+
+  <p><code>env</code> searches <code>PATH</code> for Bash. A fixed path is more predictable when the environment is controlled:</p>
+
+  <pre><code>#!/bin/bash</code></pre>
+
+  <p>The shebang matters when running <code>./script.sh</code>. It is ignored when explicitly running <code>bash script.sh</code>.</p>
+
+  <p>Make a file executable with:</p>
+
+  <pre><code>chmod +x script.sh
+./script.sh</code></pre>
+
+  <p>Other useful ways to invoke Bash:</p>
+
+  <pre><code>bash script.sh             # Run a file in a new Bash process
+bash -n script.sh          # Check syntax without executing commands
+bash -x script.sh          # Trace commands as they execute
+bash -c 'printf "%s\n" "$HOME"'  # Run a command string</code></pre>
+
+  <p>Sourcing runs a file in the <strong>current</strong> shell, so variable and directory changes remain afterward:</p>
+
+  <pre><code>source settings.sh
+. settings.sh              # Equivalent POSIX spelling</code></pre>
+
+  <h2>Commands, whitespace, and comments</h2>
+
+  <p>A simple command consists of a command name and zero or more arguments:</p>
+
+  <pre><code>printf '%s\n' "hello world"</code></pre>
+
+  <p>Spaces and tabs normally separate words. A newline ends a command. A semicolon can separate commands on one line:</p>
+
+  <pre><code>name=Ada; printf 'Hello, %s\n' "$name"</code></pre>
+
+  <p>A backslash immediately followed by a newline continues the same logical line:</p>
+
+  <pre><code>printf '%s %s\n' \
+  "first" \
+  "second"</code></pre>
+
+  <p>Comments begin with <code>#</code> when it appears where a new word could begin:</p>
+
+  <pre><code># Whole-line comment
+count=3  # End-of-line comment
+printf '%s\n' "# this is data, not a comment"</code></pre>
+
+  <p>Bash has no dedicated block-comment syntax. A common way to temporarily ignore literal text is a no-op command with a quoted here-document:</p>
+
+  <pre><code>: &lt;&lt;'COMMENT'
+Nothing in this block is executed or expanded.
+$HOME remains literal here.
+COMMENT</code></pre>
+
+  <p><code>:</code> is a builtin that does nothing successfully.</p>
+
+  <h2>Quoting and escaping</h2>
+
+  <p>Quoting controls how Bash interprets special characters.</p>
+
+  <h3>Unquoted text</h3>
+
+  <p>Unquoted expansions may undergo word splitting and filename expansion. Literal glob characters are also active:</p>
+
+  <pre><code>printf '%s\n' *.txt</code></pre>
+
+  <h3>Single quotes</h3>
+
+  <p>Single quotes preserve every character literally. A single quote cannot occur inside single quotes:</p>
+
+  <pre><code>printf '%s\n' '$HOME is not expanded'
+printf '%s\n' 'can'"'"'t'            # Adjacent quoted pieces form one word</code></pre>
+
+  <h3>Double quotes</h3>
+
+  <p>Double quotes preserve whitespace and glob characters while still allowing parameter expansion, command substitution, and arithmetic expansion:</p>
+
+  <pre><code>name='Grace Hopper'
+printf 'Hello, %s\n' "$name"
+printf 'Home: %s; files: %s\n' "$HOME" "$(find . -type f | wc -l)"</code></pre>
+
+  <p>Inside double quotes, backslash only has special meaning before <code>$</code>, backtick, <code>"</code>, <code>\</code>, or a newline.</p>
+
+  <h3>Backslash</h3>
+
+  <p>A backslash quotes the next character when unquoted:</p>
+
+  <pre><code>printf '%s\n' one\ word
+printf '%s\n' \$HOME</code></pre>
+
+  <h3>ANSI-C quoting</h3>
+
+  <p><code>$'...'</code> understands C-style escapes:</p>
+
+  <pre><code>printf '%s' $'first\nsecond\tcolumn\n'</code></pre>
+
+  <p>Common escapes include <code>\n</code>, <code>\t</code>, <code>\r</code>, <code>\\</code>, <code>\'</code>, <code>\xHH</code>, and <code>\uHHHH</code>.</p>
+
+  <h3>Locale-aware quoting</h3>
+
+  <p><code>$"..."</code> marks a string for locale translation. It is uncommon in ordinary scripts and should not be confused with <code>$'...'</code>.</p>
+
+  <h3>The default rule</h3>
+
+  <p>Quote expansions unless you specifically want splitting or globbing:</p>
+
+  <pre><code>rm -- "$file"              # One exact pathname
+printf '%s\n' "$value"     # Preserve whitespace and empty values</code></pre>
+
+  <p>The <code>--</code> convention tells many commands that later words are operands, not options.</p>
+
+  <h2>Variables and environment variables</h2>
+
+  <p>Assignments have no spaces around <code>=</code>:</p>
+
+  <pre><code>name='Ada Lovelace'
+count=5
+empty=</code></pre>
+
+  <p>Read a variable with parameter expansion:</p>
+
+  <pre><code>printf '%s\n' "$name"
+printf '%s\n' "${name} wrote notes"</code></pre>
+
+  <p>Braces remove ambiguity:</p>
+
+  <pre><code>item=book
+printf '%s\n' "${item}s"   # books, not the variable $items</code></pre>
+
+  <p>Shell variables belong to the current shell. Exported variables are copied into child-process environments:</p>
+
+  <pre><code>export APP_MODE=development
+export PATH="$HOME/bin:$PATH"</code></pre>
+
+  <p>An assignment before a command changes that command's environment only:</p>
+
+  <pre><code>LC_ALL=C sort names.txt
+DEBUG=1 ./program</code></pre>
+
+  <p>Remove a variable with <code>unset</code>:</p>
+
+  <pre><code>unset name
+unset 'scores[2]'</code></pre>
+
+  <h3>Variable attributes</h3>
+
+  <p><code>declare</code> creates variables with Bash-specific attributes:</p>
+
+  <pre><code>declare -i total=0          # Integer: assignments are evaluated arithmetically
+declare -r constant='fixed' # Read-only
+declare -x mode='test'      # Exported
+declare -a items            # Indexed array
+declare -A lookup           # Associative array
+declare -n ref=target       # Name reference to another variable</code></pre>
+
+  <p>Inside a function, use <code>local</code> to avoid changing a caller's variable:</p>
+
+  <pre><code>local result
+local -i index=0</code></pre>
+
+  <p>Useful introspection:</p>
+
+  <pre><code>declare -p name             # Reusable representation of a variable
+printf '%q\n' "$name"      # Shell-escaped representation of a value</code></pre>
+
+  <h2>Shell expansions</h2>
+
+  <p>Understanding expansions explains most surprising Bash behavior. In broad terms, Bash performs:</p>
+
+  <ol class="steps">
+    <li>brace expansion;</li>
+    <li>tilde expansion;</li>
+    <li>parameter, arithmetic, and command substitution (and process substitution);</li>
+    <li>word splitting;</li>
+    <li>filename expansion;</li>
+    <li>quote removal.</li>
+  </ol>
+
+  <p>The exact rules depend on context. Quoting normally suppresses word splitting and filename expansion.</p>
+
+  <h3>Brace expansion</h3>
+
+  <p>Brace expansion generates text before variables are expanded:</p>
+
+  <pre><code>printf '%s\n' file{1,2,3}.txt
+printf '%s\n' {01..05}
+printf '%s\n' {a..f..2}    # a, c, e
+mkdir -p project/{src,test,docs}</code></pre>
+
+  <p>Because it happens first, variables do not define brace ranges:</p>
+
+  <pre><code>end=3
+printf '%s\n' {1..$end}    # Does not produce 1 2 3</code></pre>
+
+  <h3>Tilde expansion</h3>
+
+  <p>At the start of an unquoted word, <code>~</code> represents a home directory:</p>
+
+  <pre><code>printf '%s\n' ~            # Current user's home
+printf '%s\n' ~otheruser   # Another user's home, if known</code></pre>
+
+  <p>Prefer <code>"$HOME/path"</code> when building a path inside quotes; <code>"~/path"</code> does not expand the tilde.</p>
+
+  <h3>Parameter expansion</h3>
+
+  <p>Basic forms:</p>
+
+  <pre><code>$name
+${name}
+${array[index]}</code></pre>
+
+  <p>Defaults and required values:</p>
+
+  <pre><code>${value:-fallback}          # Use fallback if unset or empty
+${value-fallback}           # Use fallback only if unset
+${value:=fallback}          # Assign fallback if unset or empty, then use it
+${value=fallback}           # Assign only if unset
+${value:?error message}     # Print error and abort if unset or empty
+${value?error message}      # Error only if unset
+${value:+replacement}       # Use replacement if set and nonempty
+${value+replacement}        # Use replacement if set</code></pre>
+
+  <p>The colon makes “empty” count the same as “unset.”</p>
+
+  <p>String length and slicing:</p>
+
+  <pre><code>text='abcdef'
+printf '%s\n' "${#text}"       # 6
+printf '%s\n' "${text:2:3}"   # cde
+printf '%s\n' "${text: -2}"   # ef; space distinguishes it from :-</code></pre>
+
+  <p>Prefix and suffix removal use glob patterns:</p>
+
+  <pre><code>path='/var/log/app.log'
+printf '%s\n' "${path#*/}"     # var/log/app.log: shortest matching prefix
+printf '%s\n' "${path##*/}"   # app.log: longest matching prefix
+printf '%s\n' "${path%.*}"    # /var/log/app: shortest matching suffix
+printf '%s\n' "${path%%/*}"   # Empty here: longest matching suffix</code></pre>
+
+  <p>Replacement and case conversion:</p>
+
+  <pre><code>value='one two two'
+printf '%s\n' "${value/two/2}"   # one 2 two
+printf '%s\n' "${value//two/2}"  # one 2 2
+printf '%s\n' "${value/#one/1}"  # Replace at beginning
+printf '%s\n' "${value/%two/2}"  # Replace at end
+printf '%s\n' "${value^^}"       # Uppercase all characters
+printf '%s\n' "${value,,}"       # Lowercase all characters</code></pre>
+
+  <p>Pattern-based case change can use one character (<code>^</code> or <code>,</code>) or all matching characters (<code>^^</code> or <code>,,</code>).</p>
+
+  <p>Transformations include:</p>
+
+  <pre><code>printf '%s\n' "${value@Q}"     # Quoted for reuse as shell input
+printf '%s\n' "${value@A}"     # Assignment/declaration representation</code></pre>
+
+  <p>Indirect expansion treats a value as another variable's name:</p>
+
+  <pre><code>target='answer'
+answer=42
+printf '%s\n' "${!target}"     # 42</code></pre>
+
+  <p>For extensive indirect access, name references (<code>declare -n</code>) are usually clearer.</p>
+
+  <h3>Command substitution</h3>
+
+  <p><code>$(...)</code> runs commands in a subshell and substitutes their standard output, removing trailing newlines:</p>
+
+  <pre><code>current_dir=$(pwd)
+line_count=$(wc -l &lt; data.txt)
+printf '%s\n' "Today is $(date +%F)"</code></pre>
+
+  <p>The older backtick form works but nests and quotes poorly:</p>
+
+  <pre><code>result=`command`            # Valid, but prefer $(command)</code></pre>
+
+  <div class="note note--tip">
+    <p class="note__label">Rule of thumb</p>
+    <p>Quote command substitutions unless splitting is intentional.</p>
+  </div>
+
+  <h3>Arithmetic expansion</h3>
+
+  <p>Arithmetic expansion substitutes an integer result:</p>
+
+  <pre><code>x=7
+printf '%d\n' "$((x * 3 + 1))"
+next=$((x + 1))</code></pre>
+
+  <p>Variable names inside arithmetic expressions do not need <code>$</code>. Bash integer arithmetic supports common C operators, including <code>+ - * / % **</code>, comparisons, bitwise operators, <code>&amp;&amp;</code>, <code>||</code>, <code>?:</code>, assignments, and pre/post increment. A leading <code>0</code> may mean octal; force base 10 with <code>10#</code>:</p>
+
+  <pre><code>month='08'
+number=$((10#$month))</code></pre>
+
+  <p>Division is integer division, and dividing by zero is an error.</p>
+
+  <h3>Word splitting and IFS</h3>
+
+  <p>After an <strong>unquoted</strong> parameter, command, or arithmetic expansion, Bash splits results using characters in <code>IFS</code> (space, tab, and newline by default):</p>
+
+  <pre><code>words='one two three'
+printf '&lt;%s&gt;\n' $words      # Three arguments
+printf '&lt;%s&gt;\n' "$words"    # One argument</code></pre>
+
+  <p>Use <code>read</code> when intentionally splitting structured text:</p>
+
+  <pre><code>IFS=: read -r user _ uid _ _ home shell &lt; /etc/passwd</code></pre>
+
+  <div class="note note--tip">
+    <p class="note__label">Rule of thumb</p>
+    <p>Avoid changing global <code>IFS</code> unnecessarily.</p>
+  </div>
+
+  <h3>Filename expansion (globbing)</h3>
+
+  <p>Unquoted patterns expand to matching pathnames:</p>
+
+  <pre><code>*.txt                       # Any name ending in .txt
+file?.log                   # Exactly one character at ?
+[abc]*                      # Begins with a, b, or c
+[!0-9]*                     # Does not begin with a digit</code></pre>
+
+  <p>Useful glob-related shell options:</p>
+
+  <pre><code>shopt -s nullglob           # An unmatched glob expands to nothing
+shopt -s failglob           # An unmatched glob is an error
+shopt -s dotglob            # Globs can match leading-dot names
+shopt -s globstar           # ** recursively traverses directories
+shopt -s extglob            # Enable extended patterns</code></pre>
+
+  <p>Extended glob patterns are:</p>
+
+  <pre><code>?(pattern-list)             # Zero or one occurrence
+*(pattern-list)             # Zero or more
++(pattern-list)             # One or more
+@(pattern-list)             # Exactly one
+!(pattern-list)             # Anything except the pattern</code></pre>
+
+  <p>Alternatives inside a pattern list use <code>|</code>, such as <code>@(jpg|png)</code>.</p>
+
+  <h2>Exit status and command chaining</h2>
+
+  <p>Every command returns an integer status. <code>0</code> means success; <code>1</code>–<code>255</code> mean some kind of failure.</p>
+
+  <pre><code>command
+status=$?                   # Status of the most recent command
+printf 'status=%d\n' "$status"</code></pre>
+
+  <p>Prefer testing a command directly instead of inspecting <code>$?</code> later:</p>
+
+  <pre><code>if mkdir archive; then
+  printf '%s\n' 'directory created'
+fi</code></pre>
+
+  <p>Logical lists use exit statuses:</p>
+
+  <pre><code>compile &amp;&amp; printf '%s\n' 'build succeeded'
+compile || printf '%s\n' 'build failed' &gt;&amp;2
+first &amp;&amp; second || fallback</code></pre>
+
+  <p><code>A &amp;&amp; B</code> runs <code>B</code> only if <code>A</code> succeeds. <code>A || B</code> runs <code>B</code> only if <code>A</code> fails. Do not treat <code>A &amp;&amp; B || C</code> as a perfect ternary expression: if <code>B</code> fails, <code>C</code> also runs.</p>
+
+  <p>A semicolon or newline runs the next command regardless:</p>
+
+  <pre><code>first; second</code></pre>
+
+  <p>An ampersand runs the preceding pipeline asynchronously:</p>
+
+  <pre><code>long_job &amp;
+job_pid=$!
+wait "$job_pid"</code></pre>
+
+  <h2>Test expressions</h2>
+
+  <h3>[[ ... ]] for Bash conditions</h3>
+
+  <p>Inside <code>[[ ... ]]</code>, words do not undergo ordinary word splitting or filename expansion. This makes it the preferred Bash conditional construct.</p>
+
+  <p>String tests:</p>
+
+  <pre><code>[[ -z $text ]]              # Empty string
+[[ -n $text ]]              # Nonempty string
+[[ $left == "$right" ]]     # Exact equality
+[[ $left != "$right" ]]     # Inequality
+[[ $left &lt; $right ]]        # Lexicographic order
+[[ $name == *.txt ]]        # Pattern match; pattern is deliberately unquoted</code></pre>
+
+  <p>Quoting the right side of <code>==</code> makes it literal:</p>
+
+  <pre><code>[[ $name == "*.txt" ]]      # Matches the literal text *.txt</code></pre>
+
+  <p>Regular expression matching uses <code>=~</code>:</p>
+
+  <pre><code>if [[ $line =~ ^([A-Za-z]+):([0-9]+)$ ]]; then
+  label=${BASH_REMATCH[1]}
+  number=${BASH_REMATCH[2]}
+fi</code></pre>
+
+  <p>Store complex regular expressions in a variable to simplify quoting:</p>
+
+  <pre><code>pattern='^[[:space:]]*#'
+[[ $line =~ $pattern ]]</code></pre>
+
+  <p>Integer comparisons:</p>
+
+  <pre><code>[[ $a -eq $b ]]             # Equal
+[[ $a -ne $b ]]             # Not equal
+[[ $a -lt $b ]]             # Less than
+[[ $a -le $b ]]             # Less than or equal
+[[ $a -gt $b ]]             # Greater than
+[[ $a -ge $b ]]             # Greater than or equal</code></pre>
+
+  <p>File tests:</p>
+
+  <pre><code>[[ -e $path ]]              # Exists
+[[ -f $path ]]              # Regular file
+[[ -d $path ]]              # Directory
+[[ -L $path ]]              # Symbolic link
+[[ -r $path ]]              # Readable
+[[ -w $path ]]              # Writable
+[[ -x $path ]]              # Executable/searchable
+[[ -s $path ]]              # Exists and has nonzero size
+[[ $a -nt $b ]]             # a is newer than b
+[[ $a -ot $b ]]             # a is older than b
+[[ $a -ef $b ]]             # Same device and inode</code></pre>
+
+  <p>Combine tests with <code>&amp;&amp;</code>, <code>||</code>, <code>!</code>, and parentheses:</p>
+
+  <pre><code>[[ -f $path &amp;&amp; ( -r $path || $force == yes ) ]]</code></pre>
+
+  <h3>[ ... ] and test</h3>
+
+  <p><code>[</code> is a command, so spaces around its arguments and closing <code>]</code> are required:</p>
+
+  <pre><code>if [ -f "$path" ]; then
+  printf '%s\n' 'regular file'
+fi
+
+test -f "$path"            # Same underlying test</code></pre>
+
+  <p>Quote expansions inside <code>[ ... ]</code>. For portable <code>sh</code>, combine commands outside the brackets:</p>
+
+  <pre><code>[ -f "$path" ] &amp;&amp; [ -r "$path" ]</code></pre>
+
+  <h3>(( ... )) for arithmetic conditions</h3>
+
+  <p>Arithmetic evaluation succeeds when its result is nonzero:</p>
+
+  <pre><code>if (( count &gt; 10 &amp;&amp; count % 2 == 0 )); then
+  printf '%s\n' 'large even count'
+fi
+
+((count++))                 # Increment; status is based on the old value
+((++count))                 # Increment; status is based on the new value</code></pre>
+
+  <div class="note note--warn">
+    <p class="note__label">Trap</p>
+    <p>Under <code>set -e</code>, standalone arithmetic whose result is zero can unexpectedly terminate a script. Use an assignment such as <code>count=$((count + 1))</code> when status is irrelevant.</p>
+  </div>
+
+  <h2>Conditional constructs</h2>
+
+  <h3>if, elif, and else</h3>
+
+  <p><code>if</code> checks the exit status of a command or command list:</p>
+
+  <pre><code>if [[ -d $path ]]; then
+  printf '%s\n' 'directory'
+elif [[ -f $path ]]; then
+  printf '%s\n' 'regular file'
+else
+  printf '%s\n' 'something else or missing'
+fi</code></pre>
+
+  <p>The condition can be any command:</p>
+
+  <pre><code>if grep -q 'needle' file.txt; then
+  printf '%s\n' 'found it'
+fi</code></pre>
+
+  <h3>case</h3>
+
+  <p><code>case</code> compares a word against glob patterns:</p>
+
+  <pre><code>case $answer in
+  y|yes|YES)
+    printf '%s\n' 'accepted'
+    ;;
+  n|no|NO)
+    printf '%s\n' 'declined'
+    ;;
+  *)
+    printf 'Unknown answer: %s\n' "$answer" &gt;&amp;2
+    ;;
+esac</code></pre>
+
+  <p>Case terminators:</p>
+
+  <ul>
+    <li><code>;;</code> stops after the matching branch.</li>
+    <li><code>;&amp;</code> continues with the next branch's commands without testing its pattern.</li>
+    <li><code>;;&amp;</code> continues testing later patterns.</li>
+  </ul>
+
+  <h2>Loops</h2>
+
+  <h3>for over words or array elements</h3>
+
+  <pre><code>for color in red green blue; do
+  printf '%s\n' "$color"
+done
+
+for file in ./*.txt; do
+  [[ -e $file ]] || continue
+  printf '%s\n' "$file"
+done
+
+for arg; do                 # Equivalent to: for arg in "$@"
+  printf 'argument: %s\n' "$arg"
+done</code></pre>
+
+  <div class="note note--warn">
+    <p class="note__label">Trap</p>
+    <p>Do not parse filenames with <code>for file in $(find ...)</code>; command substitution loses boundaries. Use globs, <code>find ... -exec</code>, or NUL-delimited input instead.</p>
+  </div>
+
+  <h3>C-style arithmetic for</h3>
+
+  <pre><code>for ((i = 0; i &lt; 5; i++)); do
+  printf '%d\n' "$i"
+done</code></pre>
+
+  <p>Any of the three expressions may be omitted.</p>
+
+  <h3>while</h3>
+
+  <pre><code>count=3
+while ((count &gt; 0)); do
+  printf '%d\n' "$count"
+  ((--count))
+done</code></pre>
+
+  <p>Read a file without damaging whitespace or backslashes:</p>
+
+  <pre><code>while IFS= read -r line || [[ -n $line ]]; do
+  printf 'line: %s\n' "$line"
+done &lt; input.txt</code></pre>
+
+  <p>The <code>|| [[ -n $line ]]</code> portion processes a final line that has no newline terminator.</p>
+
+  <h3>until</h3>
+
+  <p><code>until</code> repeats while its condition fails:</p>
+
+  <pre><code>until [[ -e ready.flag ]]; do
+  sleep 1
+done</code></pre>
+
+  <h3>Loop control</h3>
+
+  <pre><code>continue                    # Skip to the next iteration
+continue 2                  # Affect two nested loop levels
+break                       # Leave the loop
+break 2                     # Leave two nested loop levels</code></pre>
+
+  <h2>Functions</h2>
+
+  <p>The recommended function syntax is:</p>
+
+  <pre><code>greet() {
+  local name=${1:-world}
+  printf 'Hello, %s\n' "$name"
+}</code></pre>
+
+  <p>You may also encounter the Bash-specific <code>function</code> keyword:</p>
+
+  <pre><code>function greet {
+  printf 'Hello, %s\n' "${1:-world}"
+}</code></pre>
+
+  <p><code>function greet()</code> is accepted by Bash too, but mixing both forms adds nothing. The <code>name() { ...; }</code> form is clearer and is also understood by POSIX shells.</p>
+
+  <p>Call it like any command:</p>
+
+  <pre><code>greet 'Linus'</code></pre>
+
+  <p>Functions receive positional parameters of their own. Variables are otherwise global unless declared <code>local</code>.</p>
+
+  <p><code>return</code> sets the function's exit status; it does <strong>not</strong> return an arbitrary string:</p>
+
+  <pre><code>is_even() {
+  (( $1 % 2 == 0 ))
+}
+
+if is_even 12; then
+  printf '%s\n' 'even'
+fi</code></pre>
+
+  <p>To produce data, write it to standard output and capture it:</p>
+
+  <pre><code>double() {
+  printf '%d\n' "$(( $1 * 2 ))"
+}
+
+result=$(double 21)</code></pre>
+
+  <div class="note note--tip">
+    <p class="note__label">Rule of thumb</p>
+    <p>Keep diagnostic messages on standard error so they do not contaminate captured output.</p>
+  </div>
+
+  <h2>Script and function arguments</h2>
+
+  <p>Special parameters:</p>
+
+  <pre data-cols="95"><code>$0                           # Script or shell name
+$1, $2, ...                  # Positional arguments
+${10}                        # Braces required for 10 and above
+$#                           # Number of positional arguments
+"$@"                         # Every argument as a separate word
+"$*"                         # All arguments joined into one word by first IFS char
+$?                           # Most recent exit status
+$$                           # Current shell's process ID
+$!                           # PID of most recent background pipeline
+$-                           # Current shell option flags
+$_                           # Last argument of the previous simple command (context-dependent)</code></pre>
+
+  <p>Almost always iterate arguments with <code>"$@"</code>:</p>
+
+  <pre><code>for argument in "$@"; do
+  printf '&lt;%s&gt;\n' "$argument"
+done</code></pre>
+
+  <p>Remove positional arguments with <code>shift</code>:</p>
+
+  <pre><code>first=$1
+shift
+printf 'Remaining count: %d\n' "$#"</code></pre>
+
+  <p>Replace them with <code>set --</code>:</p>
+
+  <pre><code>set -- alpha 'two words' gamma</code></pre>
+
+  <h3>Parsing short options with getopts</h3>
+
+  <p><code>getopts</code> handles short options without launching another program:</p>
+
+  <pre><code>while getopts ':f:n:v' option; do
+  case $option in
+    f) file=$OPTARG ;;
+    n) count=$OPTARG ;;
+    v) verbose=true ;;
+    :) printf 'Option -%s needs a value\n' "$OPTARG" &gt;&amp;2 ;;
+    \?) printf 'Unknown option: -%s\n' "$OPTARG" &gt;&amp;2 ;;
+  esac
+done
+shift "$((OPTIND - 1))"</code></pre>
+
+  <p>In <code>:f:n:v</code>, a colon after a letter means that option needs an argument. A leading colon enables controlled error handling. Remaining non-option operands are in <code>"$@"</code> after the <code>shift</code>.</p>
+
+  <h2>Indexed arrays</h2>
+
+  <p>Create and access an indexed array:</p>
+
+  <pre><code>colors=(red 'light green' blue)
+colors[3]=yellow
+printf '%s\n' "${colors[1]}"</code></pre>
+
+  <p>Expand elements safely:</p>
+
+  <pre><code>printf '%s\n' "${colors[@]}"  # Each element remains a separate word
+printf '%s\n' "${colors[*]}"  # All elements joined into one word
+printf '%d\n' "${#colors[@]}" # Number of elements
+printf '%s\n' "${!colors[@]}" # Existing indices</code></pre>
+
+  <p>Slices and appending:</p>
+
+  <pre><code>subset=("${colors[@]:1:2}")
+colors+=(purple 'dark orange')</code></pre>
+
+  <p>Arrays can be sparse, so <code>${#array[@]}</code> is not necessarily the next free index. Append with <code>+=</code> rather than calculating an index.</p>
+
+  <p>Iterate safely:</p>
+
+  <pre><code>for color in "${colors[@]}"; do
+  printf '&lt;%s&gt;\n' "$color"
+done</code></pre>
+
+  <h2>Associative arrays</h2>
+
+  <p>Associative arrays use string keys and must be declared:</p>
+
+  <pre><code>declare -A capitals=(
+  [Canada]=Ottawa
+  [Japan]=Tokyo
+  [France]=Paris
+)
+
+capitals[Italy]=Rome
+printf '%s\n' "${capitals[Japan]}"</code></pre>
+
+  <p>Iterate keys and values:</p>
+
+  <pre><code>for country in "${!capitals[@]}"; do
+  printf '%s -&gt; %s\n' "$country" "${capitals[$country]}"
+done</code></pre>
+
+  <p>Associative-array iteration order is not guaranteed. Check whether a key exists with:</p>
+
+  <pre><code>if [[ -v 'capitals[Canada]' ]]; then
+  printf '%s\n' 'key exists'
+fi</code></pre>
+
+  <h2>Input and output</h2>
+
+  <h3>printf</h3>
+
+  <p>Prefer <code>printf</code> for predictable output:</p>
+
+  <pre><code>printf '%s\n' "$message"
+printf 'name=%s count=%d\n' "$name" "$count"
+printf -v padded '%05d' 42  # Assign output to a variable</code></pre>
+
+  <p>Useful format conversions include <code>%s</code> (string), <code>%d</code> (integer), <code>%f</code> (floating-point formatting), <code>%q</code> (shell-escaped), and <code>%b</code> (interpret backslash escapes in an argument).</p>
+
+  <div class="note note--warn">
+    <p class="note__label">Trap</p>
+    <p>Never let untrusted data become the format string:</p>
+    <pre><code>printf '%s\n' "$user_text"   # Safe</code></pre>
+  </div>
+
+  <h3>echo</h3>
+
+  <p><code>echo</code> is convenient for simple fixed strings, but handling of <code>-n</code> and backslash escapes varies. Prefer <code>printf</code> in reusable scripts.</p>
+
+  <h3>read</h3>
+
+  <pre data-cols="83"><code>IFS= read -r line            # Preserve leading/trailing whitespace and backslashes
+read -r first rest           # Split across variables using IFS
+read -r -p 'Name: ' name     # Prompt (Bash-specific)
+read -r -s -p 'Secret: ' secret  # Silent input
+read -r -n 1 key             # One character
+read -r -t 5 answer          # Five-second timeout
+read -r -u 3 line            # Read from file descriptor 3</code></pre>
+
+  <h3>mapfile / readarray</h3>
+
+  <p>Read lines directly into an indexed array:</p>
+
+  <pre><code>mapfile -t lines &lt; input.txt
+mapfile -d '' -t files &lt; &lt;(find . -type f -print0)</code></pre>
+
+  <p><code>-t</code> removes the delimiter; <code>-d ''</code> uses NUL as the delimiter. <code>readarray</code> is a synonym.</p>
+
+  <h2>Redirection and file descriptors</h2>
+
+  <p>Every process normally begins with three file descriptors:</p>
+
+  <ul>
+    <li><code>0</code>: standard input (<code>stdin</code>)</li>
+    <li><code>1</code>: standard output (<code>stdout</code>)</li>
+    <li><code>2</code>: standard error (<code>stderr</code>)</li>
+  </ul>
+
+  <p>Basic redirections:</p>
+
+  <pre><code>command &gt; output.txt        # Replace file with stdout
+command &gt;&gt; output.txt       # Append stdout
+command &lt; input.txt         # Read stdin from file
+command 2&gt; errors.txt       # Replace file with stderr
+command 2&gt;&gt; errors.txt      # Append stderr
+command &gt; all.txt 2&gt;&amp;1      # Send stdout and stderr to the same destination
+command &amp;&gt; all.txt          # Bash shorthand for both streams
+command &amp;&gt;&gt; all.txt         # Bash shorthand to append both streams
+command &gt; /dev/null         # Discard stdout
+command 2&gt;&amp;1                # Send stderr wherever stdout currently goes</code></pre>
+
+  <p>Order matters because redirections are applied left to right:</p>
+
+  <pre><code>command &gt; file 2&gt;&amp;1         # Both streams go to file
+command 2&gt;&amp;1 &gt; file         # stderr goes to old stdout; stdout goes to file</code></pre>
+
+  <p>Other descriptor forms:</p>
+
+  <pre><code>command 3&lt; input.txt        # Open descriptor 3 for reading
+command 3&gt; output.txt       # Open descriptor 3 for writing
+command 3&gt;&gt; output.txt      # Open descriptor 3 for appending
+command 3&gt;&amp;1                # Duplicate stdout onto descriptor 3
+command 3&lt;&amp;0                # Duplicate stdin onto descriptor 3
+command 3&gt;&amp;-                # Close output descriptor 3
+command 3&lt;&amp;-                # Close input descriptor 3
+command &lt;&gt; data.txt         # Open the file on stdin for reading and writing</code></pre>
+
+  <p><code>set -C</code> (also called <code>set -o noclobber</code>) prevents <code>&gt;</code> from replacing an existing regular file. <code>&gt;|</code> overrides that setting for one redirection:</p>
+
+  <pre><code>set -C
+command &gt;| deliberately-replaced.txt
+set +C</code></pre>
+
+  <p>Attach a redirection to a whole compound command:</p>
+
+  <pre><code>{
+  printf '%s\n' 'first'
+  printf '%s\n' 'second'
+} &gt; output.txt</code></pre>
+
+  <h3>Here-documents</h3>
+
+  <p>A here-document supplies multiple lines of input:</p>
+
+  <pre><code>cat &lt;&lt;EOF
+User: $USER
+Directory: $PWD
+EOF</code></pre>
+
+  <p>Quote the delimiter to prevent expansion:</p>
+
+  <pre><code>cat &lt;&lt;'EOF'
+$USER remains literal.
+So does $(date).
+EOF</code></pre>
+
+  <p><code>&lt;&lt;-EOF</code> strips leading <strong>tab characters</strong> from the body and delimiter, which can help indentation.</p>
+
+  <h3>Here-strings</h3>
+
+  <p>A here-string supplies one string plus a trailing newline:</p>
+
+  <pre><code>grep -q 'needle' &lt;&lt;&lt; "$text"</code></pre>
+
+  <h3>Managing custom descriptors</h3>
+
+  <p>Let Bash allocate an unused descriptor:</p>
+
+  <pre><code>exec {log_fd}&gt;&gt; application.log
+printf '%s\n' 'started' &gt;&amp;"$log_fd"
+exec {log_fd}&gt;&amp;-             # Close it</code></pre>
+
+  <p><code>exec</code> with only redirections changes the current shell's descriptors.</p>
+
+  <h2>Pipelines</h2>
+
+  <p>A pipeline connects each command's stdout to the next command's stdin:</p>
+
+  <pre><code>producer | filter | consumer</code></pre>
+
+  <p>By default, a pipeline's status is the last command's status. Enable <code>pipefail</code> to use the rightmost failing status instead:</p>
+
+  <pre data-cols="87"><code>set -o pipefail
+generate | transform | save
+printf '%s\n' "${PIPESTATUS[@]}"  # Status of every command in last foreground pipeline</code></pre>
+
+  <p><code>|&amp;</code> pipes both stdout and stderr from the left command:</p>
+
+  <pre><code>command |&amp; logger</code></pre>
+
+  <p>Pipeline commands normally run in subshell environments, so variable assignments made inside may not survive:</p>
+
+  <pre><code>count=0
+printf '%s\n' a b | while read -r _; do
+  ((count++))
+done
+printf '%d\n' "$count"      # Commonly still 0</code></pre>
+
+  <p>Redirect the loop instead when its state must remain:</p>
+
+  <pre><code>count=0
+while read -r _; do
+  ((count++))
+done &lt; &lt;(printf '%s\n' a b)</code></pre>
+
+  <h2>Process substitution</h2>
+
+  <p>Process substitution exposes a command's input or output as a file-like path:</p>
+
+  <pre><code>diff &lt;(sort old.txt) &lt;(sort new.txt)
+tee &gt;(gzip &gt; copy.gz) &gt;(sha256sum &gt; copy.sha256) &lt; source.dat &gt; /dev/null</code></pre>
+
+  <ul>
+    <li><code>&lt;(command)</code> lets another command read <code>command</code>'s output.</li>
+    <li><code>&gt;(command)</code> lets another command write into <code>command</code>'s input.</li>
+  </ul>
+
+  <p>Unlike command substitution, process substitution does not capture output into a string and therefore does not strip trailing newlines.</p>
+
+  <h2>Grouping, subshells, and command scope</h2>
+
+  <p>Braces run commands in the current shell. Spaces and a terminating semicolon or newline are required:</p>
+
+  <pre><code>{
+  value=changed
+  printf '%s\n' "$value"
+}
+printf '%s\n' "$value"      # changed</code></pre>
+
+  <p>Parentheses run commands in a subshell:</p>
+
+  <pre><code>location=$PWD
+(
+  cd /tmp || exit
+  printf '%s\n' "$PWD"
+)
+printf '%s\n' "$PWD"        # Original directory</code></pre>
+
+  <p>Subshells are useful for temporary directory, option, trap, or variable changes.</p>
+
+  <h2>Command lookup and execution</h2>
+
+  <p>Bash can run:</p>
+
+  <ul>
+    <li>reserved words such as <code>if</code>, <code>for</code>, and <code>case</code>;</li>
+    <li>aliases;</li>
+    <li>functions;</li>
+    <li>builtins such as <code>cd</code>, <code>printf</code>, and <code>read</code>;</li>
+    <li>executable files found through <code>PATH</code>.</li>
+  </ul>
+
+  <p>Inspect command resolution with:</p>
+
+  <pre><code>type -a printf
+command -V python</code></pre>
+
+  <p>Bypass a function or alias and use ordinary command lookup with:</p>
+
+  <pre><code>command printf '%s\n' 'text'</code></pre>
+
+  <p>Run an external file directly with its path. <code>exec command ...</code> replaces the current shell process rather than creating another one:</p>
+
+  <pre><code>exec server --port 8080</code></pre>
+
+  <h2>Jobs, processes, and signals</h2>
+
+  <p>Background commands and PIDs:</p>
+
+  <pre><code>worker &amp;
+pid=$!
+
+if wait "$pid"; then
+  printf '%s\n' 'worker succeeded'
+else
+  printf '%s\n' 'worker failed' &gt;&amp;2
+fi</code></pre>
+
+  <p>Useful job-control commands in interactive shells include <code>jobs</code>, <code>fg</code>, and <code>bg</code>. Non-interactive scripts normally track PIDs and use <code>wait</code>.</p>
+
+  <p>Send a signal with <code>kill</code>:</p>
+
+  <pre data-cols="82"><code>kill -TERM "$pid"
+kill -0 "$pid"              # Check whether signaling is possible; sends no signal</code></pre>
+
+  <h3>Traps</h3>
+
+  <p><code>trap</code> registers commands for signals or shell events:</p>
+
+  <pre><code>temporary_file=$(mktemp)
+trap 'rm -f -- "$temporary_file"' EXIT</code></pre>
+
+  <p>Common traps include <code>EXIT</code>, <code>ERR</code>, <code>DEBUG</code>, <code>RETURN</code>, <code>INT</code>, <code>TERM</code>, and <code>HUP</code>.</p>
+
+  <pre><code>trap 'printf "%s\n" "interrupted" &gt;&amp;2; exit 130' INT
+trap - INT                  # Restore default handling
+trap '' HUP                 # Ignore a signal
+trap -p                     # Display current traps</code></pre>
+
+  <div class="note note--warn">
+    <p class="note__label">Trap</p>
+    <p>Be careful with quoting: a single-quoted trap action is evaluated when the trap fires, while expansions in a double-quoted action happen when the trap is installed.</p>
+  </div>
+
+  <h2>Shell options and error handling</h2>
+
+  <p>Options controlled by <code>set</code> include:</p>
+
+  <pre><code>set -e                       # errexit: exit after certain unhandled failures
+set -u                       # nounset: error on many unset-variable expansions
+set -o pipefail              # Pipeline fails if any component fails
+set -x                       # Trace expanded commands
+set -n                       # Parse without executing
+set +x                       # Disable tracing</code></pre>
+
+  <p>The often-used combination is:</p>
+
+  <pre><code>set -Eeuo pipefail</code></pre>
+
+  <div class="note note--warn">
+    <p class="note__label">Not magic</p>
+    <p>It is useful, but not magic:</p>
+    <ul>
+      <li><code>-e</code> has exceptions in conditions, logical lists, pipelines, and other contexts.</li>
+      <li><code>-u</code> requires care with optional variables and empty arrays, especially on older Bash versions.</li>
+      <li><code>pipefail</code> changes which pipelines count as failures.</li>
+      <li><code>-E</code> makes <code>ERR</code> traps inherit into functions, substitutions, and subshells.</li>
+    </ul>
+  </div>
+
+  <p>Handle expected failures explicitly:</p>
+
+  <pre><code>if ! output=$(possibly_failing_command); then
+  printf '%s\n' 'command failed' &gt;&amp;2
+fi</code></pre>
+
+  <p><code>shopt</code> controls Bash-specific behaviors:</p>
+
+  <pre><code>shopt -s nullglob
+shopt -u nullglob
+shopt -q nullglob &amp;&amp; printf '%s\n' 'enabled'</code></pre>
+
+  <p>Temporarily trace a suspicious region:</p>
+
+  <pre><code>set -x
+value=$(transform "$input")
+set +x</code></pre>
+
+  <div class="note note--warn">
+    <p class="note__label">Trap</p>
+    <p>Do not enable tracing around secrets: expanded command arguments are printed.</p>
+  </div>
+
+  <h2>Common builtins and keywords</h2>
+
+  <p>These appear frequently in scripts:</p>
+
+  <pre><code>cd directory                 # Change working directory
+pwd                          # Print working directory
+pushd directory              # Push directory and change to it
+popd                         # Return to pushed directory
+printf ...                   # Formatted output
+read ...                     # Read fields or a line
+mapfile ...                  # Read lines into an array
+source file                  # Execute a file in this shell
+alias name='command'         # Textual command alias (mainly interactive use)
+unalias name                 # Remove alias
+declare ...                  # Set variable attributes
+local ...                    # Function-local variable
+readonly name                # Make a variable immutable
+export name                  # Add variable to child environments
+unset name                   # Remove variable or function
+type command                 # Describe command resolution
+help builtin                 # Show Bash help
+history                      # Shell history (mainly interactive)
+hash                         # Manage remembered command paths
+true                         # Successful status
+false                        # Failing status
+:                             # Successful no-op
+return [status]              # Leave function or sourced file
+exit [status]                # Leave the shell
+break [n]                    # Leave loop(s)
+continue [n]                 # Advance loop(s)
+wait [pid]                   # Wait for background work
+trap action signal           # Install signal/event handler
+umask mask                   # Set permissions mask for newly created files</code></pre>
+
+  <p>Use <code>help name</code> for Bash's built-in documentation, for example <code>help read</code>, <code>help [[</code>, or <code>help declare</code>.</p>
+
+  <h2>Less-common syntax worth recognizing</h2>
+
+  <h3>Coprocesses</h3>
+
+  <p><code>coproc</code> starts an asynchronous process with pipes for two-way communication:</p>
+
+  <pre><code>coproc TRANSFORMER { tr '[:lower:]' '[:upper:]'; }
+printf '%s\n' 'hello' &gt;&amp;"${TRANSFORMER[1]}"
+exec {TRANSFORMER[1]}&gt;&amp;-
+IFS= read -r reply &lt;&amp;"${TRANSFORMER[0]}"
+wait "$TRANSFORMER_PID"</code></pre>
+
+  <h3>select</h3>
+
+  <p><code>select</code> displays a numbered menu and reads a choice:</p>
+
+  <pre><code>select color in red green blue; do
+  [[ -n $color ]] || continue
+  printf 'Selected %s\n' "$color"
+  break
+done</code></pre>
+
+  <p>The raw user input is available in <code>REPLY</code>.</p>
+
+  <h3>Time a pipeline</h3>
+
+  <p>The <code>time</code> reserved word can time a whole pipeline:</p>
+
+  <pre><code>time generate | compress &gt; archive.gz</code></pre>
+
+  <p>Customize its Bash output with the <code>TIMEFORMAT</code> variable.</p>
+
+  <h3>Negating a pipeline</h3>
+
+  <p><code>!</code> reverses a pipeline's success status:</p>
+
+  <pre><code>if ! grep -q 'enabled' config.ini; then
+  printf '%s\n' 'setting is absent'
+fi</code></pre>
+
+  <h2>Safe patterns and common mistakes</h2>
+
+  <h3>Quote data, not syntax</h3>
+
+  <pre><code>[[ $file == *.txt ]]         # Pattern is syntax, so leave it unquoted
+rm -- "$file"                # File value is data, so quote it</code></pre>
+
+  <h3>Preserve arguments with arrays</h3>
+
+  <p>Do not assemble a command in a string:</p>
+
+  <pre><code># Fragile: options='--name "two words"'
+#          program $options</code></pre>
+
+  <p>Use an array:</p>
+
+  <pre><code>options=(--name 'two words')
+[[ $verbose == true ]] &amp;&amp; options+=(--verbose)
+program "${options[@]}"</code></pre>
+
+  <h3>Avoid eval for ordinary data</h3>
+
+  <p><code>eval</code> parses text as shell code, which easily creates quoting bugs and command-injection vulnerabilities. Arrays, associative arrays, <code>printf -v</code>, and name references solve most cases without reparsing code.</p>
+
+  <h3>Keep filenames intact</h3>
+
+  <p>Filenames can contain spaces, tabs, newlines, glob characters, and leading hyphens. Quote expansions and prefer NUL-delimited interfaces:</p>
+
+  <pre><code>while IFS= read -r -d '' file; do
+  printf '%q\n' "$file"
+done &lt; &lt;(find . -type f -print0)</code></pre>
+
+  <h3>Do not parse ls</h3>
+
+  <p>Use globs or <code>find</code> rather than treating display-oriented <code>ls</code> output as machine-readable input.</p>
+
+  <h3>Check cd</h3>
+
+  <pre><code>cd "$directory" || exit 1</code></pre>
+
+  <p>Otherwise later commands may run in the wrong directory.</p>
+
+  <h3>Use mktemp for temporary paths</h3>
+
+  <pre><code>temp_dir=$(mktemp -d) || exit 1
+trap 'rm -rf -- "$temp_dir"' EXIT</code></pre>
+
+  <div class="note note--warn">
+    <p class="note__label">Trap</p>
+    <p>Only remove a path you created and validated. Never construct a broad removal target from unchecked or possibly empty variables.</p>
+  </div>
+
+  <h3>Prefer $(...) over backticks</h3>
+
+  <p>It nests cleanly and makes quoting easier to read.</p>
+
+  <h3>Know when glob and regex syntax differ</h3>
+
+  <pre><code>[[ $name == *.txt ]]         # Glob
+[[ $name =~ \.txt$ ]]        # Extended regular expression</code></pre>
+
+  <p><code>*</code> means “any string” in a glob but “repeat the previous item” in a regular expression.</p>
+
+  <h3>Use ShellCheck</h3>
+
+  <p><a href="https://www.shellcheck.net/">ShellCheck</a> detects many quoting, portability, and data-flow mistakes:</p>
+
+  <pre><code>shellcheck script.sh</code></pre>
+
+  <h2>Combined examples</h2>
+
+  <p>These fragments deliberately omit boilerplate. Read them by tracing expansions, conditions, exit statuses, and data flow.</p>
+
+  <h3>Example A: Build a command safely</h3>
+
+  <pre><code>input='records with spaces.csv'
+output='selected.csv'
+column=4
+verbose=true
+
+awk_options=(-F, -v "column=$column")
+[[ $verbose == true ]] &amp;&amp; awk_options+=(-v verbose=1)
+
+awk "${awk_options[@]}" '
+  NR == 1 || $column != "" {
+    if (verbose) printf "keeping line %d\n", NR &gt; "/dev/stderr"
+    print
+  }
+' "$input" &gt; "$output"</code></pre>
+
+  <div class="note note--example">
+    <p class="note__label">Things to notice</p>
+    <ul>
+      <li>The array preserves each option as one argument.</li>
+      <li><code>[[ ... ]] &amp;&amp; ...</code> conditionally appends an option.</li>
+      <li>The single-quoted AWK program is passed literally to <code>awk</code>; its <code>$column</code> belongs to AWK, not Bash.</li>
+      <li>The quoted Bash pathnames remain single arguments.</li>
+      <li>Standard output becomes the result file while AWK diagnostics go to standard error.</li>
+    </ul>
+  </div>
+
+  <h3>Example B: Classify files and count extensions</h3>
+
+  <pre><code>declare -A extension_counts=()
+
+while IFS= read -r -d '' path; do
+  name=${path##*/}
+
+  if [[ $name == *.* &amp;&amp; $name != .* ]]; then
+    extension=${name##*.}
+    ((extension_counts[$extension] += 1))
+  else
+    ((extension_counts['(none)'] += 1))
+  fi
+done &lt; &lt;(find . -maxdepth 1 -type f -print0)
+
+for extension in "${!extension_counts[@]}"; do
+  printf '%-12s %d\n' "$extension" "${extension_counts[$extension]}"
+done</code></pre>
+
+  <div class="note note--example">
+    <p class="note__label">Things to notice</p>
+    <ul>
+      <li><code>find -print0</code> and <code>read -d ''</code> preserve every valid filename.</li>
+      <li>Process substitution keeps the <code>while</code> loop in the current shell, so its array updates survive.</li>
+      <li><code>${path##*/}</code> and <code>${name##*.}</code> remove the longest matching prefixes.</li>
+      <li>The associative array maps each extension to its count.</li>
+    </ul>
+  </div>
+
+  <h3>Example C: Validate and transform structured input</h3>
+
+  <pre><code>record_pattern='^([[:alpha:]_][[:alnum:]_]*):([0-9]+)$'
+
+while IFS= read -r record || [[ -n $record ]]; do
+  [[ -z $record || $record == \#* ]] &amp;&amp; continue
+
+  if [[ $record =~ $record_pattern ]]; then
+    key=${BASH_REMATCH[1]}
+    raw_number=${BASH_REMATCH[2]}
+    number=$((10#$raw_number))
+    printf '%s=%d\n' "${key^^}" "$((number * 2))"
+  else
+    printf 'invalid record: %q\n' "$record" &gt;&amp;2
+  fi
+done &lt; records.txt</code></pre>
+
+  <div class="note note--example">
+    <p class="note__label">Things to notice</p>
+    <ul>
+      <li>Blank lines and lines beginning with <code>#</code> are skipped.</li>
+      <li>The regular expression captures a key and decimal digits.</li>
+      <li><code>10#</code> prevents leading-zero values from being interpreted as octal.</li>
+      <li><code>${key^^}</code> uppercases the key; arithmetic expansion doubles the value.</li>
+      <li><code>%q</code> prints invalid input in an unambiguous escaped form.</li>
+    </ul>
+  </div>
+
+  <h3>Example D: Run concurrent work and collect failures</h3>
+
+  <pre><code>declare -A task_for_pid=()
+pids=()
+
+for task in alpha beta gamma; do
+  process_one "$task" &gt; "${task}.out" 2&gt; "${task}.err" &amp;
+  pid=$!
+  pids+=("$pid")
+  task_for_pid[$pid]=$task
+done
+
+failed=0
+for pid in "${pids[@]}"; do
+  if wait "$pid"; then
+    printf 'finished: %s\n' "${task_for_pid[$pid]}"
+  else
+    printf 'failed: %s\n' "${task_for_pid[$pid]}" &gt;&amp;2
+    failed=1
+  fi
+done
+
+((failed == 0))</code></pre>
+
+  <div class="note note--example">
+    <p class="note__label">Things to notice</p>
+    <ul>
+      <li><code>&amp;</code> starts each function call concurrently and <code>$!</code> captures its PID.</li>
+      <li>An indexed array retains launch order; an associative array relates each PID to a task.</li>
+      <li><code>wait</code> returns the corresponding job's status.</li>
+      <li>The last arithmetic condition produces an overall success or failure status.</li>
+    </ul>
+  </div>
+
+  <h3>Example E: Use a temporary workspace with cleanup</h3>
+
+  <pre><code>work_dir=$(mktemp -d) || exit 1
+trap 'rm -rf -- "$work_dir"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if curl -fsS "$url" -o "$work_dir/download" \
+  &amp;&amp; gzip -t "$work_dir/download"; then
+  gzip -dc "$work_dir/download" &gt; "$destination"
+else
+  printf 'download or validation failed\n' &gt;&amp;2
+  exit 1
+fi</code></pre>
+
+  <div class="note note--example">
+    <p class="note__label">Things to notice</p>
+    <ul>
+      <li>The temporary directory is created before the cleanup trap is installed.</li>
+      <li>The <code>EXIT</code> trap runs for normal completion and most explicit exits.</li>
+      <li><code>&amp;&amp;</code> prevents validation unless the download succeeds.</li>
+      <li>The <code>if</code> condition treats failure as expected control flow.</li>
+      <li>Quoted paths protect the generated pathname as well as the destination.</li>
+    </ul>
+  </div>
+
+  <h3>Example F: Compare two generated views without intermediate files</h3>
+
+  <pre><code>if diff -u \
+  &lt;(cut -d: -f1 /etc/passwd | sort) \
+  &lt;(printf '%s\n' "${expected_users[@]}" | sort); then
+  printf '%s\n' 'user lists match'
+else
+  status=$?
+  ((status == 1)) \
+    &amp;&amp; printf '%s\n' 'user lists differ' &gt;&amp;2 \
+    || printf 'diff failed with status %d\n' "$status" &gt;&amp;2
+fi</code></pre>
+
+  <div class="note note--example">
+    <p class="note__label">Things to notice</p>
+    <ul>
+      <li>Each <code>&lt;(...)</code> becomes a readable file-like input for <code>diff</code>.</li>
+      <li><code>"${expected_users[@]}"</code> passes every array item separately to <code>printf</code>.</li>
+      <li><code>diff</code> uses status <code>1</code> for “different” and values above <code>1</code> for an operational error.</li>
+      <li>The multiline logical list distinguishes those meanings.</li>
+    </ul>
+  </div>
+
+  <h2>Reading unfamiliar Bash</h2>
+
+  <p>When studying a script, use this order:</p>
+
+  <ol class="steps">
+    <li>Identify how it is invoked and which Bash options are enabled.</li>
+    <li>Find inputs: arguments, environment variables, files, and stdin.</li>
+    <li>Mark expansions and decide which are quoted.</li>
+    <li>Track each command's stdout, stderr, redirections, and exit status.</li>
+    <li>Note subshell boundaries: pipelines, <code>(...)</code>, command substitutions, and process substitutions.</li>
+    <li>Track mutations to variables, arrays, the working directory, traps, and background jobs.</li>
+    <li>Inspect external commands with their own documentation; Bash only arranges their arguments and streams.</li>
+  </ol>
+
+  <p>Useful investigation commands:</p>
+
+  <pre><code>bash -n script.sh            # Syntax check
+shellcheck script.sh         # Static analysis
+bash -x script.sh            # Execution trace
+help '[['                    # Bash help for conditional syntax
+help read                    # Bash help for the read builtin
+type -a command_name         # What Bash will actually run</code></pre>
+
+  <div class="note note--key">
+    <p class="note__label">The whole thing</p>
+    <p>With the syntax above, most Bash scripts become a combination of four ideas: construct exact arguments, route byte streams, branch on exit statuses, and keep track of which shell process owns each piece of state.</p>
+  </div>
+
+  <hr class="rule">
+
+  <ul class="rows">
+    <li><span class="rows__ico"></span>Source &mdash; bash-scripting-guide.md</li>
+    <li><span class="rows__ico"></span>Static analysis &mdash; <code>shellcheck script.sh</code></li>
+    <li><span class="rows__ico"></span>Built-in help &mdash; <code>help read</code>, <code>help '[['</code>, <code>help declare</code></li>
+  </ul>
+
+  <p class="small">Every callout colour means the same thing on every page: green is the thing to
+  remember, cyan is context, amber is a rule of thumb, red is a trap, lime is a worked example.</p>
+
+</main>
+</body>
+</html>

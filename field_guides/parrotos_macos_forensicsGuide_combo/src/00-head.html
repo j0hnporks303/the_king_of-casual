@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>macOS / APFS Forensics — Parrot OS Field Manual</title>
+<style>
+:root{
+  --bg:#0f1416; --bg2:#141c1f; --bg3:#0a0f11; --bg4:#182226;
+  --line:#1f2c30; --line2:#2b3d42;
+  --cy:#17c8c8; --cy2:#0e9c9c; --cyd:#0b6b6b;
+  --lime:#8fe36b; --mag:#ff4d9d; --amb:#ffb454; --vio:#a98bff;
+  --tx:#c2d0d2; --mut:#7d9296; --dim:#5c7076;
+}
+*{box-sizing:border-box; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+/* Chromium clips both the canvas background and fixed elements to the page
+   content box, so @page margins can never be painted. Instead: zero the page
+   margin, then let a single wrapper carry the margins as padding with
+   box-decoration-break:clone, which repeats padding AND background on every
+   page fragment. Result: true full-bleed dark on every sheet. */
+@page{ size:A4; margin:0; }
+#sheet{
+  background:var(--bg); padding:13mm 12mm; min-height:297mm;
+  -webkit-box-decoration-break:clone; box-decoration-break:clone;
+}
+body{
+  color:var(--tx); margin:0;
+  font-family:'JetBrains Maple Mono','JetBrains Mono',Menlo,ui-monospace,monospace;
+  font-size:8.5pt; line-height:1.52; letter-spacing:-.1px;
+}
+p{margin:0 0 6pt 0; text-align:justify; hyphens:auto;}
+a{color:var(--cy); text-decoration:none;}
+b,strong{color:#e7f2f2; font-weight:600;}
+em{color:var(--amb); font-style:normal;}
+code{font-family:inherit; color:var(--lime); background:#0c1315; border:1px solid var(--line);
+     padding:0 2px; border-radius:2px; font-size:.95em; word-break:break-word;}
+h1,h2,h3,h4,h5{font-weight:700; margin:0; line-height:1.2;}
+
+/* ---------- part divider ---------- */
+.partdiv{break-before:page; height:262mm; position:relative; padding-top:66mm;}
+.partdiv .pnum{font-size:64pt; color:#16292c; font-weight:700; line-height:.9; letter-spacing:-3px;}
+.partdiv h1{font-size:23pt; color:var(--cy); text-transform:uppercase; letter-spacing:2px;
+  margin:2mm 0 4mm 0; border-bottom:2px solid var(--cy); padding-bottom:4mm;}
+.partdiv .blurb{color:var(--mut); font-size:9pt; max-width:135mm; text-align:left;}
+.partdiv .toc-mini{margin-top:8mm; border-left:2px solid var(--line2); padding-left:5mm;}
+.partdiv .toc-mini div{color:var(--dim); font-size:8pt; padding:1pt 0;}
+.partdiv .toc-mini span{color:var(--cy2); display:inline-block; width:13mm;}
+
+/* ---------- headings ---------- */
+h2{break-before:page; font-size:14.5pt; color:var(--cy); letter-spacing:.3px;
+   padding:0 0 2.5mm 0; margin:0 0 4mm 0; border-bottom:1px solid var(--cy2);}
+h2 .hn{color:var(--dim); font-weight:400; margin-right:3mm; font-size:11pt;}
+h3{font-size:10.4pt; color:#dff5f4; margin:6mm 0 2.5mm 0; padding-left:3mm;
+   border-left:3px solid var(--cy);}
+h4{font-size:9pt; color:var(--amb); margin:4.5mm 0 1.8mm 0; letter-spacing:.2px;}
+h5{font-size:8.5pt; color:var(--vio); margin:3.5mm 0 1.2mm 0;}
+h2+p,h3+p,h4+p{margin-top:0;}
+
+/* ---------- shell blocks ---------- */
+pre.sh{
+  background:var(--bg3); border:1px solid var(--line2); border-left:3px solid var(--cy2);
+  border-radius:3px; padding:2.6mm 3mm; margin:2.5mm 0 3.5mm 0; overflow-x:auto;
+  font-size:7.8pt; line-height:1.5; white-space:pre-wrap; word-break:break-word;
+  break-inside:avoid; color:#9fb3b6;
+}
+pre.sh b{color:var(--lime); font-weight:500; display:inline;}
+pre.sh b::before{content:"└──╼ $ "; color:var(--cy); font-weight:400;}
+pre.sh b.r::before{content:"└──╼ # "; color:var(--mag); font-weight:400;}
+pre.sh b.n::before{content:""; }
+pre.sh i{color:var(--dim); font-style:normal;}
+pre.sh u{color:var(--amb); text-decoration:none;}
+pre.sh s{color:var(--mag); text-decoration:none;}
+pre.sh q{color:var(--vio); quotes:none;}
+
+/* hero terminal with full parrot prompt */
+.term{background:var(--bg3); border:1px solid var(--line2); border-radius:4px;
+  margin:3mm 0; break-inside:avoid; overflow:hidden;}
+.term .tbar{background:#131e21; border-bottom:1px solid var(--line2); padding:1.2mm 2.5mm;
+  font-size:7pt; color:var(--mut);}
+.term .tbar i{display:inline-block; width:2.2mm; height:2.2mm; border-radius:50%;
+  margin-right:1.2mm; vertical-align:middle;}
+.term .tbar .d1{background:#ff5f57;} .term .tbar .d2{background:#febc2e;} .term .tbar .d3{background:#28c840;}
+.term pre{margin:0; padding:2.6mm 3mm; font-size:7.8pt; line-height:1.5;
+  white-space:pre-wrap; word-break:break-word; color:#9fb3b6;}
+.term pre .pl{color:var(--cy);}
+.term pre .us{color:var(--lime);}
+.term pre .pa{color:var(--amb);}
+.term pre b{color:#d7ecec; font-weight:600;}
+
+/* ---------- callouts ---------- */
+.cal{border-radius:3px; padding:2.4mm 3mm 2.4mm 3.4mm; margin:3mm 0; break-inside:avoid;
+     font-size:8.1pt; border-left:3px solid;}
+.cal .ct{font-weight:700; letter-spacing:.6px; font-size:7.4pt; display:block; margin-bottom:1.2mm;}
+.cal p{margin:0 0 3pt 0;} .cal p:last-child{margin-bottom:0;}
+.devil{background:#22101a; border-color:var(--mag);} .devil .ct{color:var(--mag);}
+.caution{background:#241a0e; border-color:var(--amb);} .caution .ct{color:var(--amb);}
+.note{background:#101b1e; border-color:var(--cy2);} .note .ct{color:var(--cy);}
+.tip{background:#131f14; border-color:var(--lime);} .tip .ct{color:var(--lime);}
+
+/* ---------- tables ---------- */
+table{width:100%; border-collapse:collapse; margin:2.5mm 0 4mm 0; font-size:7.3pt;
+      break-inside:avoid; line-height:1.4;}
+th{background:#152226; color:var(--cy); text-align:left; font-weight:600;
+   padding:1.5mm 2mm; border:1px solid var(--line2); letter-spacing:.2px;}
+td{padding:1.3mm 2mm; border:1px solid var(--line); vertical-align:top; color:#aebfc2;}
+tbody tr:nth-child(even) td{background:#111a1c;}
+td code{background:none; border:none; padding:0; color:var(--lime);}
+table.tight td,table.tight th{padding:1mm 1.5mm; font-size:6.9pt;}
+.wrap{overflow-x:auto;}
+
+/* ---------- lists ---------- */
+ul,ol{margin:2mm 0 3.5mm 0; padding-left:5mm;}
+li{margin-bottom:1.4mm;}
+ul.tk{list-style:none; padding-left:1mm;}
+ul.tk li{padding-left:5mm; position:relative;}
+ul.tk li::before{content:"▸"; color:var(--cy); position:absolute; left:0;}
+ul.chk{list-style:none; padding-left:1mm;}
+ul.chk li{padding-left:6mm; position:relative;}
+ul.chk li::before{content:"[ ]"; color:var(--cy2); position:absolute; left:0; font-size:.9em;}
+dl{margin:2mm 0;} dt{color:var(--amb); font-weight:600; margin-top:2mm;}
+dd{margin:0 0 0 5mm; color:#aebfc2;}
+
+/* ---------- misc ---------- */
+.kv{display:grid; grid-template-columns:44mm 1fr; gap:1.2mm 3mm; font-size:7.8pt; margin:2mm 0;}
+.kv b{color:var(--cy2); font-weight:500; min-width:0; overflow-wrap:anywhere; line-height:1.35;}
+.kv span{min-width:0;}
+.rule{height:1px; background:var(--line2); margin:5mm 0;}
+.small{font-size:7.2pt; color:var(--mut);}
+.tag{display:inline-block; font-size:6.6pt; padding:.3mm 1.4mm; border-radius:2px;
+     border:1px solid var(--cyd); color:var(--cy); margin-right:1.2mm; letter-spacing:.3px;}
+.tag.v{border-color:#7a5a1e; color:var(--amb);}
+.tag.d{border-color:#7a2050; color:var(--mag);}
+.tag.g{border-color:#3d6b28; color:var(--lime);}
+.grid2{display:grid; grid-template-columns:1fr 1fr; gap:0 5mm;}
+.box{border:1px solid var(--line2); border-radius:3px; padding:2.5mm 3mm; margin:3mm 0;
+     background:var(--bg2); break-inside:avoid;}
+.box h4{margin-top:0;}
+figure{margin:3mm 0; break-inside:avoid;}
+figcaption{font-size:7pt; color:var(--dim); margin-top:1.2mm; text-align:center;}
+pre.dia{background:var(--bg3); border:1px solid var(--line); border-radius:3px;
+  padding:3mm; font-size:7pt; line-height:1.35; color:var(--mut); overflow-x:auto;
+  break-inside:avoid; white-space:pre;}
+pre.dia b{color:var(--cy); font-weight:500;}
+pre.dia u{color:var(--amb); text-decoration:none;}
+pre.dia s{color:var(--mag); text-decoration:none;}
+
+/* ---------- cover ---------- */
+.cover{height:264mm; position:relative; padding:0; text-align:center;}
+.cover .mark{margin:22mm auto 0 auto; width:46mm;}
+.cover h1{font-size:27pt; color:#eafcfb; letter-spacing:1px; margin:9mm 0 0 0; line-height:1.14;}
+.cover h1 span{color:var(--cy);}
+.cover .sub{color:var(--mut); font-size:9.5pt; margin-top:5mm; letter-spacing:1.6px; text-transform:uppercase;}
+.cover .band{margin:11mm auto; width:120mm; height:1px;
+  background:linear-gradient(90deg,transparent,var(--cy),transparent);}
+.cover .meta{color:var(--dim); font-size:7.6pt; line-height:1.9; letter-spacing:.4px;}
+.cover .meta b{color:var(--cy2); font-weight:400;}
+.cover .foot{position:absolute; bottom:6mm; left:0; right:0; color:#2c4348; font-size:6.8pt; letter-spacing:1px;}
+.cover .strap{display:inline-block; border:1px solid var(--cyd); color:var(--cy);
+  padding:1.4mm 4mm; font-size:7.4pt; letter-spacing:2px; margin-top:8mm;}
+
+/* ---------- toc ---------- */
+.toc{break-before:page;}
+.toc h2{break-before:auto;}
+.toc .tp{color:var(--cy); font-size:9pt; font-weight:700; margin:5mm 0 1.5mm 0;
+  border-bottom:1px solid var(--line2); padding-bottom:1mm; letter-spacing:.5px;}
+.toc .ti{display:flex; font-size:7.6pt; padding:.7mm 0; color:#a8babd;}
+.toc .ti .n{color:var(--cy2); width:14mm; flex:none;}
+.toc .ti .t{flex:1;}
+</style>
+</head>
+<body>
+<div id="sheet">
+
+<!-- ============================ COVER ============================ -->
+<section class="cover">
+  <svg class="mark" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#2ce6e0"/><stop offset="1" stop-color="#0b6b6b"/>
+      </linearGradient>
+    </defs>
+    <circle cx="60" cy="60" r="55" stroke="#1f3a3d" stroke-width="1.5"/>
+    <circle cx="60" cy="60" r="47" stroke="#16292c" stroke-width="1"/>
+    <!-- geometric parrot head -->
+    <path d="M78 34 C64 26 44 31 38 47 C33 60 37 74 47 82 L44 96 L56 88 C70 90 84 82 88 68 C91 57 88 41 78 34 Z"
+          fill="url(#g1)" opacity=".92"/>
+    <path d="M78 34 C88 41 91 57 88 68 C84 82 70 90 56 88 L52 84 C66 85 78 78 82 66 C85 55 83 42 74 36 Z"
+          fill="#0f1416" opacity=".28"/>
+    <!-- beak -->
+    <path d="M38 47 L22 55 L36 61 L34 53 Z" fill="#ffb454"/>
+    <path d="M22 55 L36 61 L33 65 Z" fill="#e07a1f"/>
+    <!-- eye -->
+    <circle cx="52" cy="52" r="6.5" fill="#0a0f11"/>
+    <circle cx="52" cy="52" r="3" fill="#2ce6e0"/>
+    <circle cx="53.6" cy="50.4" r="1" fill="#eafcfb"/>
+    <!-- crest, rooted into the skull line -->
+    <path d="M62 29 L58 14 L70 24 L74 10 L82 24 L92 18 L86 33" stroke="#2ce6e0" stroke-width="2.4"
+          stroke-linecap="round" stroke-linejoin="round" fill="none" opacity=".95"/>
+  </svg>
+
+  <h1>macOS &amp; APFS<br><span>Forensics</span></h1>
+  <div class="sub">Parrot OS Field Manual</div>
+  <div class="band"></div>
+
+  <div class="meta">
+    Analysing a FileVault2-encrypted APFS image from Debian<br>
+    <b>Target:</b> macOS Ventura 13 and newer &nbsp;·&nbsp; <b>Platform:</b> Parrot OS / Debian<br>
+    <b>Scope:</b> Dead-box disk analysis · artifact recovery · persistence hunting
+  </div>
+
+  <div class="strap">TRADITIONAL · ADVANCED · EXOTIC</div>
+
+  <div class="foot">
+    FOR AUTHORISED FORENSIC EXAMINATION AND EDUCATIONAL USE
+  </div>
+</section>
