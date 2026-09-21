@@ -418,6 +418,7 @@ Usage:
   tkoc theme [name|list|set]  Apply a KDE Plasma appearance profile
   tkoc clamav <subcommand>    ClamAV install/scan (see: tkoc clamav help)
   tkoc wg [show|up|down]      WireGuard keypair and tunnel state
+  tkoc install wireguard      Install WireGuard and generate a keypair
   tkoc vm net on|off|status   Guest network passthrough in the firewall
   tkoc uav [PORT|show|detect] Port and reachability analysis
   tkoc fs lock [path]         Tighten file permissions you own
@@ -483,7 +484,10 @@ case "$cmd" in
   dotfiles)       cmd_dotfiles "$@" ;;
   theme)          cmd_theme "$@" ;;
   clamav)         cmd_clamav "$@" ;;
-  wg|wireguard)   cmd_wg "$@" ;;
+  # `wg` is the status command; the full word `wireguard` is the stage, the
+  # same way `base` and `hardening` name stages. These must not share an arm:
+  # whichever came first silently swallowed the other.
+  wg)             cmd_wg "$@" ;;
   vm)             cmd_vm "$@" ;;
   uav)            cmd_uav "$@" ;;
   fs)             cmd_fs "$@" ;;

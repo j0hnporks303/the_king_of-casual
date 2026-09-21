@@ -86,7 +86,7 @@ set_state() {
     { print }
   ' "$LIVE_NFT" > "$tmp"
 
-  tkoc_validate_nft "$tmp"
+  tkoc_validate_nft "$tmp" privileged
   run_root_path "$LIVE_NFT" install -m 0600 -- "$tmp" "$LIVE_NFT"
   rm -f -- "$tmp"
 

@@ -686,11 +686,23 @@ tkoc_render_define() {
   mv "$tmp" "$file"
 }
 
-# Validate a rendered nftables file. `nft --check` is the real validator; where
-# it is unavailable (a non-Linux development machine) say so plainly rather
-# than reporting a pass nothing actually checked.
+# Validate a rendered nftables file.
+#
+#   tkoc_validate_nft <file> [privileged]
+#
+# The structural checks are cheap and always run. `nft --check` is the real
+# validator, but it is not a pure parse: it opens a netlink socket and performs
+# a dry-run transaction, so it needs CAP_NET_ADMIN. Run as an ordinary user it
+# fails with EPERM -- which is an answer about permissions, not about the
+# policy. Treating that as a validation failure made every tier refuse to apply
+# before it had written anything.
+#
+# So: a caller that is about to write the policy as root passes "privileged"
+# and gets a real check under sudo. A read-only caller (tkoc check) runs it
+# unprivileged and, if the kernel refuses, says the check was skipped rather
+# than claiming either a pass or a failure it did not earn.
 tkoc_validate_nft() {
-  local file="$1"
+  local file="$1" privileged="${2:-}" output="" status=0
   [[ -r "$file" ]] || die "missing nftables policy: $file"
   grep -Fq 'table inet tkoc_host' "$file" || die "nftables policy does not define tkoc_host"
   grep -Fq 'chain input' "$file" || die "nftables policy has no input chain"
@@ -698,12 +710,35 @@ tkoc_validate_nft() {
   grep -Fq 'chain output' "$file" || die "nftables policy has no output chain"
   grep -Fq 'policy drop;' "$file" || die "nftables policy has no default-drop chain"
 
-  if command -v nft >/dev/null 2>&1; then
-    nft --check --file "$file" || die "nftables policy failed native validation"
-    log "nftables syntax: valid"
-  else
-    log "nftables syntax: native check skipped (nft unavailable in this environment)"
+  if ! command -v nft >/dev/null 2>&1; then
+    log "nftables syntax: native check skipped (nft is not installed here)"
+    return 0
   fi
+
+  if [[ "$privileged" == privileged ]] \
+    && [[ ${EUID:-$(id -u)} -ne 0 ]] \
+    && [[ -z "${TKOC_TEST_ROOT:-}" ]] \
+    && ! tkoc_bool_enabled TKOC_DRY_RUN disabled; then
+    output="$(sudo nft --check --file "$file" 2>&1)" || status=$?
+  else
+    output="$(nft --check --file "$file" 2>&1)" || status=$?
+  fi
+
+  if (( status == 0 )); then
+    log "nftables syntax: valid"
+    return 0
+  fi
+
+  # Distinguish "the kernel would not let me ask" from "the policy is wrong".
+  if [[ ${EUID:-$(id -u)} -ne 0 ]] \
+    && grep -qiE 'Operation not permitted|Permission denied|Could not open socket' <<<"$output"; then
+    log "nftables syntax: native check needs privilege and was skipped"
+    log "  structural checks passed; run 'sudo tkoc check' for the full check"
+    return 0
+  fi
+
+  printf '%s\n' "$output" >&2
+  die "nftables policy failed native validation"
 }
 
 tkoc_validate_sysctl() {

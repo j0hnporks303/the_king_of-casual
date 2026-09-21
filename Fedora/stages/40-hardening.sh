@@ -282,7 +282,7 @@ render_policy() {
     POLICY_SSH_SOURCE="$ssh_source"
   fi
 
-  tkoc_validate_nft "$RENDERED_NFT"
+  tkoc_validate_nft "$RENDERED_NFT" privileged
   tkoc_validate_sysctl "$RENDERED_SYSCTL"
 }
 

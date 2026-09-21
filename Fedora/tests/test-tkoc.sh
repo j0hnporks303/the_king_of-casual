@@ -55,6 +55,53 @@ if bash "$TKOC" bogus >/dev/null 2>&1; then
 fi
 ok "an unknown command fails"
 
+# ── Dispatcher routing ──────────────────────────────────────────
+#
+# Every command the help text advertises must actually reach its
+# implementation. This exists because `tkoc wireguard` did not: the `wg`
+# status alias shared a case arm with the stage name and silently swallowed
+# it, so a documented command answered with a usage error instead of running.
+
+routes_to() {
+  local expected="$1"; shift
+  local out="$TEST_AREA/route.out"
+  if ! bash "$TKOC" "$@" --dry-run --allow-unsupported > "$out" 2>&1; then
+    sed 's/^/    /' "$out" >&2
+    fail "tkoc $* exited non-zero"
+  fi
+  grep -qF "$expected" "$out" || {
+    sed 's/^/    /' "$out" >&2
+    fail "tkoc $* did not reach $expected"
+  }
+}
+
+# Bare stage names.
+routes_to 'Running stage: base'      base
+routes_to 'Firewall tier'            hardening
+routes_to 'WireGuard'                wireguard
+routes_to 'ClamAV'                   antivirus
+routes_to 'theme'                    ricing
+# ... and the same stages through `tkoc install`.
+routes_to 'Running stage: base'      install base
+routes_to 'Firewall tier'            install hardening
+routes_to 'WireGuard'                install wireguard
+routes_to 'ClamAV'                   install antivirus
+routes_to 'Privacy hardening'        install privacy
+ok "every stage is reachable both bare and through 'install'"
+
+# `wg` must remain the status command, not the stage.
+bash "$TKOC" wg show > "$TEST_AREA/wg.out" 2>&1 || fail "tkoc wg show failed"
+assert_grep 'WireGuard status' "$TEST_AREA/wg.out" "tkoc wg show did not reach the status command"
+ok "tkoc wg is the status command, distinct from the wireguard stage"
+
+# Every command named in the top-level help must be dispatchable: it may fail
+# for an environmental reason, but it must never answer "Unknown command".
+while IFS= read -r verb; do
+  out="$(bash "$TKOC" "$verb" --help 2>&1 || true)"
+  grep -q "Unknown command: $verb" <<<"$out" && fail "tkoc $verb is advertised but not dispatched"
+done < <(bash "$TKOC" help | awk '$1 == "tkoc" && $2 ~ /^[a-z]+$/ { print $2 }' | sort -u)
+ok "every command in the help text is dispatched"
+
 # ── Policy content ──────────────────────────────────────────────
 
 NFT="$PROJECT_ROOT/config/firewall/tkoc.nft"
