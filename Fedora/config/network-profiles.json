@@ -1,0 +1,27 @@
+{
+  "_comment": [
+    "Per-network DNS and IPv6 settings for `tkoc firewall auto` and the",
+    "NetworkManager dispatcher installed by `tkoc firewall watch`.",
+    "",
+    "Deliberately limited to DNS and IPv6. The dispatcher NEVER changes the",
+    "firewall tier, the nftables ruleset, or any service state: a policy that",
+    "loosened itself because you joined a particular Wi-Fi network would be a",
+    "policy an attacker can choose for you by naming an access point.",
+    "",
+    "Match by SSID. `tkoc firewall learn` fills in the network you are on now."
+  ],
+  "default": {
+    "dns": "",
+    "ipv6": "disabled"
+  },
+  "profiles": [
+    {
+      "name": "home",
+      "ssid": "",
+      "bssid": "",
+      "gateway": "",
+      "dns": "",
+      "ipv6": "disabled"
+    }
+  ]
+}

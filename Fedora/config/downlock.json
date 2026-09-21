@@ -1,0 +1,30 @@
+{
+  "_comment": [
+    "Permission targets for tkoc fs lock (downlock) and tkoc fs lockdown.",
+    "Patterns are matched against the basename unless they contain a slash,",
+    "in which case they are matched against the path suffix.",
+    "First match wins, so the specific entries are listed before the defaults."
+  ],
+  "rules": [
+    { "pattern": ".ssh",              "type": "dir",  "mode": "700" },
+    { "pattern": ".ssh/*",            "type": "file", "mode": "600" },
+    { "pattern": ".gnupg",            "type": "dir",  "mode": "700" },
+    { "pattern": ".gnupg/*",          "type": "file", "mode": "600" },
+    { "pattern": "id_*",              "type": "file", "mode": "600" },
+    { "pattern": "*.pem",             "type": "file", "mode": "600" },
+    { "pattern": "*.key",             "type": "file", "mode": "600" },
+    { "pattern": "*.p12",             "type": "file", "mode": "600" },
+    { "pattern": ".netrc",            "type": "file", "mode": "600" },
+    { "pattern": ".pgpass",           "type": "file", "mode": "600" },
+    { "pattern": ".aws",              "type": "dir",  "mode": "700" },
+    { "pattern": ".aws/*",            "type": "file", "mode": "600" },
+    { "pattern": ".kube",             "type": "dir",  "mode": "700" },
+    { "pattern": ".kube/config",      "type": "file", "mode": "600" },
+    { "pattern": ".docker/config.json", "type": "file", "mode": "600" },
+    { "pattern": ".git-credentials",  "type": "file", "mode": "600" },
+    { "pattern": "*.env",             "type": "file", "mode": "600" },
+    { "pattern": ".env",              "type": "file", "mode": "600" },
+    { "pattern": "*",                 "type": "dir",  "mode": "755" },
+    { "pattern": "*",                 "type": "file", "mode": "644" }
+  ]
+}

@@ -1,0 +1,12 @@
+# >>> tkoc >>>
+# Managed by tkoc dotfiles. Do not edit between these markers; changes
+# here are overwritten the next time 'tkoc dotfiles' runs.
+tkoc_dotfiles_dir="${XDG_CONFIG_HOME:-$HOME/.config}/tkoc/dotfiles/shell.d"
+if [[ -d "$tkoc_dotfiles_dir" ]]; then
+    for tkoc_snippet in "$tkoc_dotfiles_dir"/*.sh; do
+        [[ -r "$tkoc_snippet" ]] && source "$tkoc_snippet"
+    done
+    unset -v tkoc_snippet
+fi
+unset -v tkoc_dotfiles_dir
+# <<< tkoc <<<
