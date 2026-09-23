@@ -46,7 +46,7 @@ require_policy() {
   fi
   if [[ -z "$POLICY_BODY" ]]; then
     if root_path_exists "$LIVE_NFT"; then
-      die "the firewall policy at $LIVE_NFT needs privilege to read (try: sudo tkoc vm net status)"
+      die "the firewall policy at $LIVE_NFT needs privilege to read (try: sudo \"\$(command -v tkoc)\" vm net status)"
     fi
     die "no firewall policy is installed at $LIVE_NFT (run: tkoc firewall strong)"
   fi

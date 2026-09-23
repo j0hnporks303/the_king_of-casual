@@ -190,6 +190,7 @@ check:
 test:
 	@bash "$(REPO_DIR)/tests/regression.sh"
 	@bash "$(REPO_DIR)/tests/test-tkoc.sh"
+	@python3 "$(REPO_DIR)/tests/test-runtime.py"
 
 help:
 	@echo "make                     link tkoc into $(BIN_DIR)"

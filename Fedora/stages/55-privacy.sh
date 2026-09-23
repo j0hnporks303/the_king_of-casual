@@ -149,7 +149,8 @@ selected_categories() {
 }
 
 run_category() {
-  local category="$1" script="$HARDENING_DIR/$category.sh" rc=0
+  local category="$1" rc=0
+  local script="$HARDENING_DIR/$category.sh"
   [[ -f "$script" ]] || die "Privacy category script not found: $script"
 
   # The firewall stage's remote-access toggle and this category do identical

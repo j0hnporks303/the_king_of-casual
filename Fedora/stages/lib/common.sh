@@ -587,13 +587,15 @@ copy_file() {
 # unknown.
 read_root_file() {
   local target="$1"
-  [[ -e "$target" ]] || return 1
   if [[ -r "$target" ]]; then
     cat -- "$target"
     return 0
   fi
   # A test root is a user-owned sandbox; escalating inside one is never right.
   [[ -n "${TKOC_TEST_ROOT:-}" ]] && return 1
+  # An inaccessible parent (notably /etc/nftables) makes -e false even for an
+  # existing file. Only infer absence when we can actually traverse the parent.
+  if [[ -x "$(dirname -- "$target")" && ! -e "$target" ]]; then return 1; fi
   [[ ${EUID:-$(id -u)} -eq 0 ]] && { cat -- "$target"; return 0; }
   if tkoc_bool_enabled TKOC_DRY_RUN disabled; then
     sudo -n cat -- "$target" 2>/dev/null || return 1
@@ -807,7 +809,7 @@ tkoc_validate_nft() {
   if [[ ${EUID:-$(id -u)} -ne 0 ]] \
     && grep -qiE 'Operation not permitted|Permission denied|Could not open socket' <<<"$output"; then
     log "nftables syntax: native check needs privilege and was skipped"
-    log "  structural checks passed; run 'sudo tkoc check' for the full check"
+    log "  structural checks passed; run 'sudo \"\$(command -v tkoc)\" check' for the full check"
     return 0
   fi
 

@@ -316,7 +316,26 @@ assert_grep 'nothing was changed' "$TEST_AREA/uninstall.out" \
 assert_file "$TKOC_TEST_ROOT/etc/nftables/tkoc.nft"
 ok "uninstall reports without applying"
 
-bash "$PROJECT_ROOT/tools/uninstall.sh" --apply > "$TEST_AREA/uninstall2.out"
+# The host may have firewalld masked. An isolated uninstall must not inspect
+# that host state or run systemctl against it, even when --apply is supplied.
+mkdir -p "$TEST_AREA/bin"
+cat > "$TEST_AREA/bin/systemctl" <<'SYSTEMCTL'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$TKOC_TEST_ROOT/systemctl-calls"
+if [[ "$*" == 'is-enabled firewalld.service' ]]; then
+  printf 'masked\n'
+fi
+exit 0
+SYSTEMCTL
+chmod +x "$TEST_AREA/bin/systemctl"
+mkdir -p "$XDG_CONFIG_HOME/systemd/user"
+touch "$XDG_CONFIG_HOME/systemd/user/tkoc-clamav.timer" \
+  "$XDG_CONFIG_HOME/systemd/user/tkoc-clamav.service"
+PATH="$TEST_AREA/bin:$PATH" bash "$PROJECT_ROOT/tools/uninstall.sh" --apply > "$TEST_AREA/uninstall2.out"
+[[ ! -e "$TKOC_TEST_ROOT/systemctl-calls" ]] \
+  || fail "isolated uninstall contacted the real systemd manager"
+[[ ! -e "$XDG_CONFIG_HOME/systemd/user/tkoc-clamav.timer" ]] \
+  || fail "isolated uninstall left the staged user timer behind"
 [[ -f "$TKOC_TEST_ROOT/etc/nftables/tkoc.nft" ]] && fail "uninstall --apply left the policy in place"
 refute_grep '# >>> tkoc >>>' "$TKOC_TEST_ROOT/etc/sysconfig/nftables.conf" \
   "uninstall --apply left the boot include behind"

@@ -150,7 +150,8 @@ hc_config_get() {
 # absent. Rewrites through a temp file and install(1) so a failed write cannot
 # leave a half-written config behind, and snapshots the original first.
 hc_set_config() {
-  local file="$1" section="$2" key="$3" value="$4" label="${5:-$key}"
+  local file="$1" section="$2" key="$3" value="$4"
+  local label="${5:-$key}"
   local current tmp
 
   if current="$(hc_config_get "$file" "$section" "$key" 2>/dev/null)" \
@@ -216,7 +217,8 @@ hc_set_config() {
 # config file: dnf never overwrites them on upgrade, and removing the file is a
 # complete, obvious undo.
 hc_drop_in() {
-  local unit_dir="$1" name="$2" content="$3" label="${4:-$name}"
+  local unit_dir="$1" name="$2" content="$3"
+  local label="${4:-$name}"
   local target="$unit_dir/$name" tmp
 
   if [[ -r "$target" ]] && [[ "$(cat "$target")" == "$content" ]]; then
@@ -256,7 +258,8 @@ hc_drop_in() {
 hc_kde_available() { have_cmd kwriteconfig6 && have_cmd kreadconfig6; }
 
 hc_set_kconfig() {
-  local file="$1" group="$2" key="$3" value="$4" label="${5:-$file/$group/$key}"
+  local file="$1" group="$2" key="$3" value="$4"
+  local label="${5:-$file/$group/$key}"
   local current
 
   if ! hc_kde_available; then
@@ -298,7 +301,8 @@ hc_set_kconfig() {
 # ────────────────────────────────────────────────────────────────
 
 hc_set_sysctl() {
-  local key="$1" value="$2" label="${3:-$key}" current
+  local key="$1" value="$2" current
+  local label="${3:-$key}"
 
   current="$(sysctl -n "$key" 2>/dev/null || true)"
   if [[ -z "$current" ]]; then

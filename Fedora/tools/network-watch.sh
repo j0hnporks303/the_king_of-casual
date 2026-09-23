@@ -18,8 +18,9 @@ source "$REPO_ROOT/stages/lib/common.sh"
 source "$REPO_ROOT/stages/lib/persistence.sh"
 
 DISPATCHER="$TKOC_DISPATCHER_DIR/90-tkoc-network-watch"
-PROFILES_DST="$TKOC_PERSISTENCE_DIR/network-profiles.json"
-HELPER_DST="$TKOC_PERSISTENCE_DIR/network-profile.sh"
+WATCH_ROOT="$TKOC_PERSISTENCE_DIR/network-watch"
+PROFILES_DST="$WATCH_ROOT/config/network-profiles.json"
+HELPER_DST="$WATCH_ROOT/tools/network-profile.sh"
 LOG_FILE="/var/log/tkoc-network-watch.log"
 
 usage() {
@@ -67,6 +68,10 @@ cmd_install() {
 
   tkoc_install_privileged_file "$REPO_ROOT/config/network-profiles.json" "$PROFILES_DST" 0644
   tkoc_install_privileged_file "$REPO_ROOT/tools/network-profile.sh" "$HELPER_DST" 0755
+  local lib
+  for lib in common state; do
+    tkoc_install_privileged_file "$REPO_ROOT/stages/lib/$lib.sh" "$WATCH_ROOT/stages/lib/$lib.sh" 0644
+  done
 
   local tmp
   tmp="$(mktemp "${TMPDIR:-/tmp}/tkoc-dispatch.XXXXXX")"
@@ -81,17 +86,18 @@ set -Eeuo pipefail
 interface="${1:-}"
 action="${2:-}"
 case "$action" in
-  up|dhcp4-change|dhcp6-change|connectivity-change) ;;
+  up|dhcp4-change|dhcp6-change) ;;
   *) exit 0 ;;
 esac
 
 export TKOC_UPDATE_YES=enabled
-export TKOC_NETWORK_PROFILES=/usr/local/libexec/tkoc/network-profiles.json
+export TKOC_NETWORK_PROFILES=/usr/local/libexec/tkoc/network-watch/config/network-profiles.json
+export TKOC_NETWORK_INTERFACE="$interface"
 export HOME=/root
 
 {
   printf '[%s] %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$interface" "$action"
-  /usr/bin/env bash /usr/local/libexec/tkoc/network-profile.sh 2>&1 || true
+  /usr/bin/env bash /usr/local/libexec/tkoc/network-watch/tools/network-profile.sh 2>&1 || true
 } >> /var/log/tkoc-network-watch.log 2>&1
 DISPATCH
   tkoc_install_privileged_file "$tmp" "$DISPATCHER" 0755
@@ -107,6 +113,13 @@ cmd_uninstall() {
   tkoc_remove_privileged_file "$DISPATCHER"
   tkoc_remove_privileged_file "$PROFILES_DST"
   tkoc_remove_privileged_file "$HELPER_DST"
+  local lib
+  for lib in common state; do
+    tkoc_remove_privileged_file "$WATCH_ROOT/stages/lib/$lib.sh"
+  done
+  # Remove files installed by the older, incomplete flat layout too.
+  tkoc_remove_privileged_file "$TKOC_PERSISTENCE_DIR/network-profiles.json"
+  tkoc_remove_privileged_file "$TKOC_PERSISTENCE_DIR/network-profile.sh"
   log "network-watch removed. The DNS and IPv6 it last set are unchanged;"
   log "restore them from a snapshot, or with: tkoc firewall auto"
 }

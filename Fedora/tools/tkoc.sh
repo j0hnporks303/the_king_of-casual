@@ -6,7 +6,14 @@
 # something this CLI does not expose.
 set -Eeuo pipefail
 
-_tkoc_self="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -- "${BASH_SOURCE[0]}")"
+# `make` installs a symlink. Resolve it before locating the checkout, including
+# relative links and links through another directory; HOME is not its location.
+_tkoc_self="${BASH_SOURCE[0]}"
+while [[ -L "$_tkoc_self" ]]; do
+  _tkoc_dir="$(cd -- "$(dirname -- "$_tkoc_self")" && pwd -P)"
+  _tkoc_self="$(readlink -- "$_tkoc_self")"
+  [[ "$_tkoc_self" == /* ]] || _tkoc_self="$_tkoc_dir/$_tkoc_self"
+done
 REPO_ROOT="$(cd -- "$(dirname -- "$_tkoc_self")/.." && pwd -P)"
 
 [[ -f "$REPO_ROOT/stages/lib/common.sh" ]] \
@@ -51,12 +58,7 @@ cmd_audit()  { _tool audit "$@"; }
 cmd_state()  { _tool state "$@"; }
 cmd_uav()    { _tool uav "$@"; }
 cmd_pgp()    { _tool pgp "$@"; }
-cmd_link()   {
-  case "${1:-help}" in
-    dir|directory|unlink|rm|list|ls|where|bin|help|--help|-h) _tool linker "$@" ;;
-    *) _tool linker link "$@" ;;
-  esac
-}
+cmd_link()   { _tool linker "$@"; }
 cmd_killall()   { _tool killall "$@"; }
 cmd_update()    { _header "Update report"; need_not_root; _tool update "$@"; }
 cmd_uninstall() { _tool uninstall "$@"; }
@@ -72,7 +74,9 @@ cmd_firewall() {
   local sub="${1:-status}"
   case "$sub" in
     status|show)
-      _header "Firewall status"; shift; _tool firewall-status "$@" ;;
+      _header "Firewall status"
+      if (( $# > 0 )); then shift; fi
+      _tool firewall-status "$@" ;;
     test|check)
       shift; _header "Firewall live test"; _tool firewall-test "$@" ;;
     learn)
@@ -86,6 +90,7 @@ cmd_firewall() {
 Usage:
   tkoc firewall status
   tkoc firewall test [--local-only] [--ports 22,445]
+  tkoc firewall test --inbound-check [port]
   tkoc firewall learn
   tkoc firewall auto [--dry-run] [--yes]
   tkoc firewall watch [install|uninstall|status]
@@ -128,9 +133,10 @@ cmd_privacy() {
       _header "Applying privacy level: $sub"; shift
       TKOC_PRIVACY_LEVEL="$sub" _stage 55-privacy "$@" ;;
     apply|run)
-      local level="${2:-${TKOC_PRIVACY_LEVEL:-strong}}"
+      shift
+      local level="${TKOC_PRIVACY_LEVEL:-strong}"
+      if [[ -n "${1:-}" && "$1" != -* ]]; then level="$1"; shift; fi
       _header "Applying privacy level: $level"
-      if (( $# >= 2 )); then shift 2; else shift; fi
       TKOC_PRIVACY_LEVEL="$level" _stage 55-privacy "$@" ;;
     status)
       _header "Privacy posture"; _stage 55-privacy --status ;;
@@ -139,7 +145,7 @@ cmd_privacy() {
     # Forward instead of falling through to the help text below. A documented
     # feature that silently prints help and exits 0 is worse than one that
     # errors: it looks like it worked.
-    --categories|--categories=*|--category)
+    --categories|--categories=*|--category|--dry-run|-n|--yes|-y|--allow-unsupported|--ssh|--no-ssh|--list-categories|--status)
       _header "Applying privacy categories"; _stage 55-privacy "$@" ;;
     help|--help|-h)
       cat <<'HELP'
@@ -305,13 +311,18 @@ cmd_harden() {
     return "$rc"
   fi
   [[ -z "${TKOC_ACTIVE_SNAPSHOT:-}" ]] || tkoc_state_finish
-  _ok "Hardening complete. Verify with: sudo tkoc audit"
+  _ok "Hardening complete. Verify with: sudo $(printf '%q' "$REPO_ROOT/tools/tkoc.sh") audit"
 }
 
 # ── Remaining groups ────────────────────────────────────────────
 
 cmd_install() {
   local stage="${1:-}"
+  case "$stage" in
+    help|--help|-h)
+      printf 'Usage: tkoc install <stage> [options]\nStages: base hardening wireguard antivirus privacy ricing postcheck\n'
+      return 0 ;;
+  esac
   [[ -n "$stage" ]] || _die "Usage: tkoc install <stage>"
   shift
   local script; script="$(_stage_script "$stage")"
@@ -329,16 +340,31 @@ cmd_clamav() {
       _stage 50-antivirus --daily "$@" ;;
     scan)
       shift
+      local -a scan_args=()
+      while (( $# > 0 )); do
+        case "$1" in
+          -*) tkoc_parse_safety_flag "$1" || _die "Unknown scan option: $1" ;;
+          *) scan_args+=("$1") ;;
+        esac
+        shift
+      done
+      (( ${#scan_args[@]} <= 1 )) || _die "Usage: tkoc clamav scan [path] [--dry-run]"
+      set -- "${scan_args[@]}"
       local target="${1:-$HOME/Downloads}"
       command -v clamscan >/dev/null 2>&1 || _die "clamscan not found. Run: tkoc clamav install"
       _header "Scanning $target"
-      clamscan -ri --bell "$target" ;;
+      run_or_print clamscan -ri --bell -- "$target" ;;
     uninstall-daily)
-      systemctl --user disable --now tkoc-clamav.timer >/dev/null 2>&1 || true
-      rm -f -- "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/tkoc-clamav."{timer,service}
-      systemctl --user daemon-reload >/dev/null 2>&1 || true
+      shift
+      while (( $# > 0 )); do
+        tkoc_parse_safety_flag "$1" || _die "Unknown uninstall-daily option: $1"
+        shift
+      done
+      run_or_print systemctl --user disable --now tkoc-clamav.timer || true
+      run_or_print rm -f -- "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/tkoc-clamav."{timer,service}
+      run_or_print systemctl --user daemon-reload || true
       _ok "daily scan timer removed" ;;
-    *)
+    help|--help|-h)
       cat <<'HELP'
 Usage:
   tkoc clamav install            Install ClamAV and refresh signatures
@@ -350,6 +376,7 @@ The daily timer runs as your own user over your Downloads, Desktop and
 Documents. It is not a root scanner and does not crawl the whole filesystem.
 HELP
       ;;
+    *) _die "Unknown ClamAV subcommand: $sub. Run 'tkoc clamav help'." ;;
   esac
 }
 
@@ -370,8 +397,17 @@ cmd_wg() {
         sudo -n wg show 2>/dev/null || printf '  no active tunnel, or no cached sudo access\n'
       fi ;;
     up|down)
-      local iface="${2:-${TKOC_WG_IFACE:-wg0}}"
+      shift
+      local iface="${TKOC_WG_IFACE:-wg0}"
+      if [[ -n "${1:-}" && "$1" != -* ]]; then iface="$1"; shift; fi
+      while (( $# > 0 )); do
+        tkoc_parse_safety_flag "$1" || _die "Unknown WireGuard option: $1"
+        shift
+      done
+      tkoc_valid_interface "$iface" || _die "Not a valid interface name: $iface"
       run_root systemctl "$([[ "$sub" == up ]] && printf start || printf stop)" "wg-quick@$iface" ;;
+    help|--help|-h)
+      printf 'Usage: tkoc wg [show|up|down] [interface] [--dry-run]\nInstall tools and keys with: tkoc install wireguard\n' ;;
     *) _die "Usage: tkoc wg [show|up|down]" ;;
   esac
 }
@@ -385,7 +421,7 @@ cmd_fs() {
       cat <<'HELP'
 Usage:
   tkoc fs lock [path] [--list|--apply|--anywhere|--verbose]
-  sudo tkoc fs lockdown [path] [--list|--apply|--include-dirs|--verbose]
+  sudo "$(command -v tkoc)" fs lockdown [path] [--list|--apply|--include-dirs|--verbose]
 
 Both report by default and only change modes with --apply.
 HELP
@@ -422,7 +458,7 @@ Usage:
   tkoc vm net on|off|status   Guest network passthrough in the firewall
   tkoc uav [PORT|show|detect] Port and reachability analysis
   tkoc fs lock [path]         Tighten file permissions you own
-  sudo tkoc fs lockdown       Same, for root-owned files
+  sudo "$(command -v tkoc)" fs lockdown   Same, for root-owned files
   tkoc pgp <subcommand>       Encrypt/decrypt with GnuPG
   tkoc link <source> [name]   Symlink an executable onto PATH
   tkoc killall                Close every open graphical app

@@ -21,7 +21,7 @@ usage() {
 lockdown -- report and tighten root-owned file permissions
 
 Usage:
-  sudo tkoc fs lockdown [path] [options]
+  sudo "$(command -v tkoc)" fs lockdown [path] [options]
   sudo tkoc-lockdown [path] [options]
 
 Options:

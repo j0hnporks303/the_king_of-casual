@@ -42,14 +42,14 @@ HELP
 }
 
 registry_add() {
-  local name="$1" source="$2"
+  local name="$1" source="$2" dest="$3"
   tkoc_bool_enabled TKOC_DRY_RUN disabled && return 0
   mkdir -p -- "$(dirname -- "$REGISTRY")"
   touch -- "$REGISTRY"
   # Rewrite rather than append, so re-linking the same name does not accumulate.
   local tmp; tmp="$(mktemp "${TMPDIR:-/tmp}/tkoc-links.XXXXXX")"
   awk -F'\t' -v n="$name" '$1 != n' "$REGISTRY" > "$tmp" 2>/dev/null || true
-  printf '%s\t%s\t%s\n' "$name" "$BIN_DIR/$name" "$source" >> "$tmp"
+  printf '%s\t%s\t%s\n' "$name" "$dest" "$source" >> "$tmp"
   mv -- "$tmp" "$REGISTRY"
 }
 
@@ -85,9 +85,9 @@ link_one() {
     fi
   fi
 
-  run_root mkdir -p -- "$(dirname -- "$dest")"
-  run_root ln -sfn -- "$source" "$dest"
-  registry_add "$name" "$source"
+  run_root_path "$(dirname -- "$dest")" mkdir -p -- "$(dirname -- "$dest")"
+  run_root_path "$dest" ln -sfn -- "$source" "$dest"
+  registry_add "$name" "$source" "$dest"
   log "linked: $dest -> $source"
 }
 
@@ -117,12 +117,16 @@ cmd_list() {
 }
 
 cmd_unlink() {
-  local name="${1:-}" dest
+  local name="${1:-}" dest source
   [[ -n "$name" ]] || die "unlink requires a link name (see: tkoc link list)"
   registry_has "$name" || die "tkoc link did not create a link named '$name'"
   dest="$(awk -F'\t' -v n="$name" '$1 == n { print $2; exit }' "$REGISTRY")"
-  [[ -L "$dest" ]] || log "note: $dest is not a symlink any more"
-  run_root rm -f -- "$dest"
+  source="$(awk -F'\t' -v n="$name" '$1 == n { print $3; exit }' "$REGISTRY")"
+  if [[ -e "$dest" || -L "$dest" ]]; then
+    [[ -L "$dest" && "$(readlink -- "$dest")" == "$source" ]] \
+      || die "refusing to remove $dest: it is no longer the link tkoc created"
+    run_root_path "$(dirname -- "$dest")" rm -f -- "$dest"
+  fi
   if ! tkoc_bool_enabled TKOC_DRY_RUN disabled; then
     local tmp; tmp="$(mktemp "${TMPDIR:-/tmp}/tkoc-links.XXXXXX")"
     awk -F'\t' -v n="$name" '$1 != n' "$REGISTRY" > "$tmp"

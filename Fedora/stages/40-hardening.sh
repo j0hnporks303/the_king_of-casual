@@ -34,7 +34,7 @@ usage() {
 40-hardening -- apply the nftables firewall and kernel hardening
 
 Usage:
-  zsh stages/40-hardening.sh <tier> [options]
+  bash stages/40-hardening.sh <tier> [options]
   tkoc firewall <tier> [options]
 
 Tiers:

@@ -61,7 +61,9 @@ if [[ "$_have" == yes ]]; then
   line "inferred tier" "$tier"
 elif root_path_exists "$LIVE_NFT"; then
   line "policy file" "$LIVE_NFT (present; needs privilege to read)"
-  line "tier" "run 'sudo tkoc firewall status' to read it"
+  line "tier" "run 'sudo \"\$(command -v tkoc)\" firewall status' to read it"
+elif [[ ! -x "$(dirname -- "$LIVE_NFT")" && -d "$(dirname -- "$LIVE_NFT")" ]]; then
+  line "policy file" "unknown (needs privilege to inspect $(dirname -- "$LIVE_NFT"))"
 else
   line "policy file" "not installed (run: tkoc firewall strong)"
 fi
@@ -75,7 +77,7 @@ printf '\nBoot persistence\n'
 unit_report() {
   local value
   value="$(systemctl "$1" "$2" 2>/dev/null)" || true
-  printf '%s' "${value:-not installed}"
+  printf '%s' "${value:-unknown (could not query systemd)}"
 }
 if command -v systemctl >/dev/null 2>&1; then
   line "nftables.service enabled" "$(unit_report is-enabled nftables.service)"
@@ -83,7 +85,7 @@ if command -v systemctl >/dev/null 2>&1; then
   _fw="$(unit_report is-active firewalld.service)"
   case "$_fw" in
     active) line "firewalld" "$_fw -- it also manages nftables; see 'tkoc audit'" ;;
-    *)      line "firewalld" "$_fw (good: nothing competes for the ruleset)" ;;
+    *) line "firewalld" "$_fw" ;;
   esac
   unset _fw
 else
@@ -92,7 +94,7 @@ fi
 _sysconfig="${TKOC_TEST_ROOT:-}/etc/sysconfig/nftables.conf"
 if [[ -e "$_sysconfig" ]]; then
   # This file is 0600 root:root on Fedora, so an ordinary user cannot grep it.
-  if _contents="$(read_root_file "$_sysconfig")"; then
+  if _contents="$(read_root_file_quiet "$_sysconfig")"; then
     if grep -Fq 'include "/etc/nftables/tkoc.nft"' <<<"$_contents"; then
       line "include wired up" "yes"
     else
@@ -118,6 +120,6 @@ elif sudo -n nft list table inet tkoc_host >/dev/null 2>&1; then
         name=""
       }'
 else
-  line "tkoc_host table" "not readable without privilege (try: sudo tkoc firewall status)"
+  line "tkoc_host table" "not readable without privilege (try: sudo \"\$(command -v tkoc)\" firewall status)"
 fi
 printf '\n'

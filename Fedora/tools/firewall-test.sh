@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # tools/firewall-test.sh -- prove the policy does what it claims.
 #
-# Three checks, each read-only with respect to configuration:
+# Checks are read-only with respect to configuration:
 #   1. what is listening locally          (always)
 #   2. whether outbound still works       (always, unless --local-only)
-#   3. whether anything answers inbound   (only with an explicit external probe)
+#   3. whether inbound packets hit the default drop (explicit LAN probe)
 #
-# The external probe contacts a third-party service to see this machine from the
-# outside. That is a deliberate disclosure of your IP to that service, so it is
-# opt-in: --local-only is the default-safe form and is what CI should use.
+# The optional public IP lookup contacts a third-party service. --local-only
+# avoids that disclosure; --inbound-check uses a second LAN device instead.
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -17,26 +16,36 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 source "$REPO_ROOT/stages/lib/common.sh"
 
 LOCAL_ONLY=disabled
+INBOUND_CHECK=disabled
+INBOUND_PORT=65000
 PORTS="22,80,443,445,631,5353,9090"
 
 usage() {
   cat <<'HELP'
-firewall test -- live check of listeners, egress, and inbound reachability
+firewall test -- live check of listeners, egress, and inbound drops
 
 Usage:
   tkoc firewall test [--local-only] [--ports 22,445]
+  tkoc firewall test --inbound-check [port]
 
   --local-only   Skip anything that contacts an external service
   --ports        Ports to report on (default: 22,80,443,445,631,5353,9090)
+  --inbound-check [port]
+                Compare the input drop counter around a probe from another LAN
+                device (default TCP port: 65000). Requires sudo to read nftables.
 
-The external reachability probe is skipped unless you omit --local-only, and it
-tells you before it runs which service it is about to contact.
+The normal test offers a public IP lookup through ifconfig.co unless --local-only
+is given. The inbound check contacts no external service from this machine.
 HELP
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --local-only) LOCAL_ONLY=enabled; shift ;;
+    --inbound-check)
+      INBOUND_CHECK=enabled; shift
+      if [[ $# -gt 0 && "$1" != --* ]]; then INBOUND_PORT="$1"; shift; fi
+      ;;
     --ports) [[ $# -ge 2 ]] || die "--ports requires a comma-separated list"; PORTS="$2"; shift 2 ;;
     --ports=*) PORTS="${1#*=}"; shift ;;
     help|--help|-h) usage; exit 0 ;;
@@ -45,6 +54,48 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "$PORTS" =~ ^[0-9]+(,[0-9]+)*$ ]] || die "--ports must be a comma-separated list of port numbers"
+[[ "$INBOUND_PORT" =~ ^[0-9]+$ ]] && (( 10#$INBOUND_PORT >= 1 && 10#$INBOUND_PORT <= 65535 )) \
+  || die "--inbound-check port must be between 1 and 65535"
+
+read_input_drops() {
+  local result
+  command -v nft >/dev/null 2>&1 || die "nft is unavailable"
+  if (( EUID == 0 )); then
+    result="$(nft list counter inet tkoc_host input_dropped)" \
+      || die "cannot read the tkoc input drop counter"
+  else
+    command -v sudo >/dev/null 2>&1 || die "sudo is unavailable"
+    result="$(sudo nft list counter inet tkoc_host input_dropped)" \
+      || die "cannot read the tkoc input drop counter"
+  fi
+  printf '%s\n' "$result" | awk '
+    $1 == "packets" { print $2; found = 1; exit }
+    END { if (!found) exit 1 }
+  ' || die "nft returned no input drop packet count"
+}
+
+if [[ "$INBOUND_CHECK" == enabled ]]; then
+  before="$(read_input_drops)"
+  printf '\nInbound drop check (TCP/%s)\n' "$INBOUND_PORT"
+  printf '  input_dropped before: %s packets\n' "$before"
+  printf '  LAN addresses to try:\n'
+  ip -4 -o addr show scope global 2>/dev/null \
+    | awk '{ printf "    %s  %s\n", $2, $4 }' || true
+  printf '\n  From a DIFFERENT device on the same LAN, run:\n'
+  printf '    nc -vz -w 2 <this-machine-LAN-IP> %s\n' "$INBOUND_PORT"
+  printf '  A timeout is expected. Press Enter here after the probe.\n'
+  IFS= read -r _confirmation || die "inbound check needs a terminal after the LAN probe"
+  after="$(read_input_drops)"
+  printf '  input_dropped after:  %s packets\n' "$after"
+  if (( after > before )); then
+    printf '  %s new drop(s): consistent with the LAN probe reaching this firewall.\n' "$((after - before))"
+    printf '  Other inbound traffic may also have contributed to this count.\n'
+  else
+    printf '  No new drops: the probe did not reach this rule, or was accepted earlier.\n'
+    printf '  Check the address, port, LAN path, and whether another rule accepts it.\n'
+  fi
+  exit 0
+fi
 
 printf '\n\033[1;36mListening sockets\033[0m\n'
 if ! command -v ss >/dev/null 2>&1; then

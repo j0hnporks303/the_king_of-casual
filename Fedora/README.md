@@ -99,6 +99,13 @@ tkoc firewall status
 tkoc firewall test --local-only
 ```
 
+To check the inbound default drop from a second device on your LAN, run
+`tkoc firewall test --inbound-check` on this machine. It shows a LAN address and
+the command to run on the other device, then compares the nftables drop counter
+after the probe. This check reads the live rules with sudo but changes no rules.
+An increased counter is consistent with the probe reaching the firewall; other
+inbound traffic can also increment it.
+
 ### Privacy levels
 
 14 category scripts under `stages/hardening/`, each `--dry-run`-clean,
@@ -163,8 +170,8 @@ different kind of state under the same path.
 ## Auditing
 
 ```bash
-sudo tkoc audit      # full posture: firewall, boot trust, SELinux, listeners
-sudo tkoc doctor     # hardware only: filesystems, SMART, drivers, firmware
+sudo "$(command -v tkoc)" audit   # full posture: firewall, boot trust, SELinux, listeners
+sudo "$(command -v tkoc)" doctor  # hardware only: filesystems, SMART, drivers, firmware
 tkoc status          # one page, read-only, no privilege
 tkoc uav show all    # every listener, with its owner
 ```
@@ -210,7 +217,7 @@ tkoc uav 443                     # is this port listening, and does policy allow
 tkoc uav detect forwarding       # NAT and IP-forwarding state
 tkoc fs lock ~/Documents         # report file permissions that are too loose
 tkoc fs lock ~/Documents --apply
-sudo tkoc fs lockdown            # the root-owned counterpart
+sudo "$(command -v tkoc)" fs lockdown  # the root-owned counterpart
 tkoc pgp encrypt ~/notes -r you@example.com
 tkoc link ~/scripts/deploy.sh    # symlink onto PATH
 tkoc vm net on|off|status        # guest network passthrough
@@ -240,7 +247,7 @@ make it change.
 ## Development
 
 ```bash
-make test        # both suites
+make test        # shell suites and Python runtime regressions
 ```
 
 `tests/regression.sh` checks that everything parses, that every `--help` path
@@ -251,7 +258,12 @@ exactly as documented, and that snapshots round-trip.
 `tests/test-tkoc.sh` performs an isolated install, tier staging, privacy
 preview, and uninstall inside a sandbox, without touching the host.
 
-Both run on a non-Fedora development machine. Where the native validator is
+`tests/test-runtime.py` checks installed symlinks, command defaults, dry-run
+safety, update query failures, network profiles and the installed dispatcher
+helper. It uses temporary homes and fake system commands; it does not change
+the host's services, firewall or drivers. Python 3 is required.
+
+The suites run on a non-Fedora development machine. Where the native validator is
 missing — `nft --check` above all — they say so plainly rather than reporting a
 pass that nothing actually checked.
 

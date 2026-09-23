@@ -167,6 +167,7 @@ audit_filesystem_health() {
     journalctl --no-pager --all --since '30 days ago' 2>/dev/null \
       | grep -Ei \
         'Dirty bit is set|not properly unmounted|journal.*(corrupt|uncleanly shut down)|Buffer I/O error|blk_update_request|critical medium error|EXT[234]-fs.*(error|warning)|BTRFS.*(error|corrupt|checksum)|XFS.*(error|corrupt)|F2FS-fs.*error|exFAT-fs.*(error|corrupt)|NTFS.*(error|corrupt)|Remounting filesystem read-only' \
+      | grep -Eiv 'BTRFS info .*using .*checksum algorithm' \
       | awk '!seen[$0]++' || true
   )
   count="${#filesystem_findings[@]}"
@@ -199,7 +200,7 @@ audit_storage_health() {
     return
   fi
 
-  audit_read_lines disks < <(lsblk -dn -o NAME,TYPE | awk '$2 == "disk" { print "/dev/" $1 }')
+  audit_read_lines disks < <(lsblk -dn -o NAME,TYPE | awk '$2 == "disk" && $1 !~ /^zram/ { print "/dev/" $1 }')
   if (( ${#disks[@]} == 0 )); then
     audit_warn "no physical block devices were found"
     return
@@ -310,6 +311,23 @@ audit_nvidia_stack() {
   local module_path module_package module_version user_version signer taints
   local nvidia_output nvidia_status=0 findings
   local -a graphics_findings=()
+
+  # NVIDIA hardware can use Fedora's nouveau driver. Check the driver bound
+  # to the GPU before treating the optional proprietary stack as mandatory.
+  local drivers
+  drivers="$(lspci -Dnnk 2>/dev/null | awk '
+    /^[[:xdigit:]]{4}:/ { gpu = /NVIDIA/ && /VGA compatible controller|3D controller|Display controller/ }
+    gpu && /Kernel driver in use:/ { print $NF }
+  ')"
+  if grep -qx nouveau <<<"$drivers" && ! grep -qx nvidia <<<"$drivers"; then
+    audit_info "NVIDIA graphics is currently using the Nouveau driver"
+    if modinfo nvidia >/dev/null 2>&1; then
+      audit_warn "the proprietary NVIDIA module is installed but is not the driver bound to the GPU"
+    else
+      audit_warn "the proprietary NVIDIA driver is not installed for the running kernel; Nouveau is active"
+    fi
+    return 0
+  fi
 
   if ! modinfo nvidia >/dev/null 2>&1; then
     audit_fail "NVIDIA hardware is present but the nvidia kernel module is unavailable"
@@ -677,30 +695,40 @@ audit_remote_access() {
 }
 
 audit_firewall_state() {
+  local output status=0 enabled active
   if ! command -v nft >/dev/null 2>&1; then
     audit_fail "nft is not installed; there is no tkoc firewall policy to verify"
     return
   fi
-  if nft list table inet tkoc_host >/dev/null 2>&1; then
+  output="$(nft list table inet tkoc_host 2>&1)" || status=$?
+  if (( status == 0 )); then
     audit_pass "tkoc_host firewall table is loaded"
-  else
+  elif grep -qiE 'Operation not permitted|Permission denied|Could not open socket' <<<"$output"; then
+    audit_warn "the live firewall needs privilege to inspect; its state could not be verified"
+  elif grep -qi 'No such file or directory' <<<"$output"; then
     audit_fail "tkoc_host firewall table is not loaded"
+  else
+    audit_warn "the live firewall could not be queried"
+    show_excerpt "$output" 3
   fi
 
   if command -v systemctl >/dev/null 2>&1; then
-    if unit_enabled nftables.service; then
-      audit_pass "nftables.service is enabled, so the policy is restored at boot"
-    else
-      audit_fail "nftables.service is not enabled; the policy will not survive a reboot"
-    fi
+    enabled="$(systemctl is-enabled nftables.service 2>/dev/null || true)"
+    case "$enabled" in
+      enabled) audit_pass "nftables.service is enabled, so the policy is restored at boot" ;;
+      disabled|masked|masked-runtime|not-found|enabled-runtime)
+        audit_fail "nftables.service is $enabled; boot persistence is not enabled" ;;
+      *) audit_warn "nftables.service boot persistence could not be verified" ;;
+    esac
 
     # firewalld competing for the ruleset is the Fedora-specific failure that
     # silently undoes this policy, so it is a FAIL rather than a note.
-    if unit_active firewalld.service; then
-      audit_fail "firewalld is running and also manages nftables; the tkoc policy may be overwritten"
-    else
-      audit_pass "firewalld is not running, so nothing competes for the nftables ruleset"
-    fi
+    active="$(systemctl is-active firewalld.service 2>/dev/null || true)"
+    case "$active" in
+      active) audit_fail "firewalld is running and also manages nftables; the tkoc policy may be overwritten" ;;
+      inactive|failed) audit_pass "firewalld is not running" ;;
+      *) audit_warn "firewalld state could not be verified" ;;
+    esac
   fi
 }
 

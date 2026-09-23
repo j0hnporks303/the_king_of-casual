@@ -102,7 +102,7 @@ show_firewall() {
   if ! policy="$(read_root_file_quiet "$live" 2>/dev/null)"; then
     if root_path_exists "$live"; then
       note "the tkoc policy is installed but needs privilege to read"
-      note "run: sudo tkoc uav show firewall"
+      note "run: sudo \"\$(command -v tkoc)\" uav show firewall"
     else
       note "no tkoc policy is installed (run: tkoc firewall strong)"
     fi
@@ -137,7 +137,7 @@ detect_forwarding() {
     nat="$(sudo -n nft list ruleset 2>/dev/null | grep -cE 'masquerade|dnat to' || true)"
     printf '  %-30s %s\n' "NAT rules in the ruleset" "${nat:-0}"
   else
-    note "the live ruleset needs privilege to read (sudo tkoc uav detect forwarding)"
+    note "the live ruleset needs privilege to read (sudo \"\$(command -v tkoc)\" uav detect forwarding)"
   fi
 
   head_ "Bridges"
@@ -176,7 +176,7 @@ check_port() {
     local live="${TKOC_TEST_ROOT:-}/etc/nftables/tkoc.nft" policy
     if ! policy="$(read_root_file_quiet "$live" 2>/dev/null)"; then
       if root_path_exists "$live"; then
-        note "the tkoc policy needs privilege to read (sudo tkoc uav $port)"
+        note "the tkoc policy needs privilege to read (sudo \"\$(command -v tkoc)\" uav $port)"
       else
         note "no tkoc policy is installed, so nothing here governs $port"
       fi

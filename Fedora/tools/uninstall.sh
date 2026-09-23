@@ -88,9 +88,14 @@ _timer="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/tkoc-clamav.timer"
 if [[ -f "$_timer" ]]; then
   item "remove the daily ClamAV timer"
   if [[ "$APPLY" == enabled ]]; then
-    systemctl --user disable --now tkoc-clamav.timer >/dev/null 2>&1 || true
+    # A staged uninstall must never control the real user's systemd instance.
+    if [[ -z "${TKOC_TEST_ROOT:-}" ]]; then
+      systemctl --user disable --now tkoc-clamav.timer >/dev/null 2>&1 || true
+    fi
     rm -f -- "$_timer" "${_timer%.timer}.service"
-    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    if [[ -z "${TKOC_TEST_ROOT:-}" ]]; then
+      systemctl --user daemon-reload >/dev/null 2>&1 || true
+    fi
   fi
 else
   item "no ClamAV timer installed"
@@ -128,7 +133,8 @@ else
   item "no tkoc include in $NFT_SYSCONFIG"
 fi
 unset _sysconf_body
-if command -v systemctl >/dev/null 2>&1 \
+if [[ -z "${TKOC_TEST_ROOT:-}" ]] \
+  && command -v systemctl >/dev/null 2>&1 \
   && [[ "$(systemctl is-enabled firewalld.service 2>/dev/null || true)" == masked* ]]; then
   item "firewalld is masked; unmask it"
   do_it run_root systemctl unmask firewalld.service
