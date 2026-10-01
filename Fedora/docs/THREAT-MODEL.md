@@ -77,10 +77,15 @@ devices. It does not assume a targeted, well-resourced physical attacker.
 - **VPNs, Tor, and proxies.** These are legitimate outbound tools the
   permissive-egress design does not attempt to block.
 - **Guest network isolation.** VM and container bridges (`virbr*`, `docker*`,
-  `podman*`, `cni-podman*`, `incusbr*`, `vboxnet*`, `br-*`) are forwarded
-  broadly by default. `tkoc vm net off` turns that off wholesale; tightening
-  guest-to-host or guest-to-internet access selectively is a site-specific
-  change, documented in the comments in `config/firewall/tkoc.nft`.
+  `podman*`, `cni-podman*`, `incusbr*`, `vboxnet*`, `br-*`) start blocked in the
+  forward chain. `tkoc vm net on` permits them; `off` blocks existing and new
+  forwarded connections. Re-applying a firewall tier returns the toggle to
+  off. VirtualBox NAT uses the host output path, so `tkoc vm` also disconnects
+  registered VirtualBox adapters and restores their prior cable states on `on`.
+  New VirtualBox VMs need an `off` reconciliation after creation. QEMU user-mode
+  networking (SLIRP or passt) is still outside this toggle. Guest-to-host
+  traffic also needs separate review. Tightening access selectively is a
+  site-specific change.
 - **Container-published ports.** A container runtime inserts its own DNAT rules,
   which bypass expectations set by the host firewall. `tkoc uav show containers`
   reports what is published and flags anything bound to all interfaces, but does

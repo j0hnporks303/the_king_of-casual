@@ -2,10 +2,9 @@
 # tools/vm-net.sh -- let VM and container guests reach the internet, or not.
 #
 # The forward chain in config/firewall/tkoc.nft carries a marked block that
-# accepts guest-originated traffic on libvirt, docker, podman, incus and generic
-# bridges. This toggles that block in the INSTALLED policy and reloads, so the
-# choice survives a reboot. Re-applying a firewall tier resets it to on, because
-# the tier's template is the source of truth.
+# blocks guest bridges before conntrack's established accept when off, and
+# permits forwarding when on. VirtualBox's NAT runs in a host process, so its
+# virtual cables are toggled separately through VBoxManage.
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -30,7 +29,10 @@ Usage:
 
 Covers virbr* (libvirt), docker*, podman*, cni-podman*, incusbr*, vboxnet* and
 br-* interfaces. The toggle edits the marked block in /etc/nftables/tkoc.nft and
-reloads, so it survives a reboot. Re-applying a firewall tier resets it to on.
+reloads, so it survives a reboot. Re-applying a firewall tier resets it to off.
+Registered VirtualBox adapters are disconnected when off and restored to their
+previous cable state when on. New VMs must be checked after creation.
+User-mode QEMU/SLIRP and passt use the host output path and are not covered.
 HELP
 }
 
@@ -54,26 +56,130 @@ require_policy() {
     || die "the installed policy has no VM block; re-apply a tier to refresh it"
 }
 
+require_guard() {
+  grep -Fq '# TKOC_VM_GUARD' <<<"$POLICY_BODY" \
+    || die "the installed VM policy predates the established-flow guard; re-apply the firewall tier, then retry"
+}
+
 # "on" when at least one accept inside the block is live (not commented).
 current_state() {
   awk -v b="$BEGIN_MARKER" -v e="$END_MARKER" '
     index($0, b) { inside = 1; next }
     index($0, e) { inside = 0; next }
-    inside && /^[[:space:]]+iifname/ { live = 1 }
+    inside && /^[[:space:]]+iifname.*accept[[:space:]]*$/ { live = 1 }
     END { print (live ? "on" : "off") }
   ' <<<"$POLICY_BODY"
 }
 
+# VirtualBox NAT does not pass through the host forward chain. Keep the saved
+# adapter state with the VM so the user's existing disconnected adapters stay
+# disconnected when the toggle returns to on. VBoxManage must run as the VM's
+# owner, even when the firewall part of this command is run through sudo.
+vbox_manage() {
+  if (( EUID == 0 )) && [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != root ]]; then
+    sudo -u "$SUDO_USER" -H VBoxManage "$@"
+  else
+    VBoxManage "$@"
+  fi
+}
+
+vbox_vms() {
+  local listing line
+  listing="$(vbox_manage list vms)" || die "could not list VirtualBox VMs"
+  while IFS= read -r line; do
+    [[ "$line" =~ \{([[:xdigit:]-]{36})\}$ ]] && printf '%s\n' "${BASH_REMATCH[1]}"
+  done <<<"$listing"
+}
+
+vbox_field() {
+  local info="$1" key="$2"
+  awk -F= -v key="$key" '$1 == key { gsub(/^"|"$/, "", $2); print $2; exit }' <<<"$info"
+}
+
+vbox_set_state() {
+  local want="$1" uuid info vm_state slot nic cable key saved count=0
+  [[ -n "${TKOC_TEST_ROOT:-}" && "${TKOC_TEST_VBOX:-}" != enabled ]] && return 0
+  command -v VBoxManage >/dev/null 2>&1 || return 0
+  local vms; vms="$(vbox_vms)" || return 1
+  while IFS= read -r uuid; do
+    [[ -n "$uuid" ]] || continue
+    info="$(vbox_manage showvminfo "$uuid" --machinereadable 2>/dev/null)" \
+      || { warn "VirtualBox VM $uuid is inaccessible; its cables were not changed"; continue; }
+    vm_state="$(vbox_field "$info" VMState)"
+    for slot in {1..8}; do
+      nic="$(vbox_field "$info" "nic$slot")"
+      [[ -n "$nic" && "$nic" != none ]] || continue
+      cable="$(vbox_field "$info" "cableconnected$slot")"
+      key="tkoc/vm-net/restore-cable$slot"
+      if [[ "$want" == off && "$cable" == on ]]; then
+        vbox_manage setextradata "$uuid" "$key" on
+        if [[ "$vm_state" == running || "$vm_state" == paused ]]; then
+          vbox_manage controlvm "$uuid" "setlinkstate$slot" off
+        else
+          vbox_manage modifyvm "$uuid" "--cable-connected$slot" off
+        fi
+        ((count+=1))
+      elif [[ "$want" == on ]]; then
+        saved="$(vbox_manage getextradata "$uuid" "$key" 2>/dev/null)" || saved=""
+        if [[ "$saved" == 'Value: on' ]]; then
+          if [[ "$cable" != on ]]; then
+            if [[ "$vm_state" == running || "$vm_state" == paused ]]; then
+              vbox_manage controlvm "$uuid" "setlinkstate$slot" on
+            else
+              vbox_manage modifyvm "$uuid" "--cable-connected$slot" on
+            fi
+            ((count+=1))
+          fi
+          vbox_manage setextradata "$uuid" "$key"
+        fi
+      fi
+    done
+  done <<<"$vms"
+  log "VirtualBox adapters changed: $count"
+}
+
+vbox_status() {
+  [[ -n "${TKOC_TEST_ROOT:-}" && "${TKOC_TEST_VBOX:-}" != enabled ]] && return 0
+  command -v VBoxManage >/dev/null 2>&1 || return 0
+  local vms uuid info slot nic cable connected=0 configured=0 inaccessible=0
+  vms="$(vbox_vms)" || return 1
+  while IFS= read -r uuid; do
+    [[ -n "$uuid" ]] || continue
+    info="$(vbox_manage showvminfo "$uuid" --machinereadable 2>/dev/null)" \
+      || { ((inaccessible+=1)); continue; }
+    for slot in {1..8}; do
+      nic="$(vbox_field "$info" "nic$slot")"
+      [[ -n "$nic" && "$nic" != none ]] || continue
+      ((configured+=1))
+      cable="$(vbox_field "$info" "cableconnected$slot")"
+      [[ "$cable" == on ]] && ((connected+=1))
+    done
+  done <<<"$vms"
+  printf '  VirtualBox cables: %s connected of %s configured\n' "$connected" "$configured"
+  if (( inaccessible > 0 )); then
+    printf '  WARNING: %s inaccessible VirtualBox VM(s) could not be checked\n' "$inaccessible"
+  fi
+  if [[ "$(current_state)" == off && "$connected" -gt 0 ]]; then
+    printf '  WARNING: VirtualBox has connected adapters outside the bridge firewall; run tkoc vm off\n'
+  fi
+}
+
 set_state() {
   local want="$1" tmp
+  require_guard
   local now; now="$(current_state)"
-  if [[ "$now" == "$want" ]]; then
-    log "guest network passthrough is already $want"
+
+  if tkoc_bool_enabled TKOC_DRY_RUN disabled; then
+    log "[dry-run] would turn guest network passthrough $want and reconcile VirtualBox cables"
     return 0
   fi
 
-  if tkoc_bool_enabled TKOC_DRY_RUN disabled; then
-    log "[dry-run] would turn guest network passthrough $want in $LIVE_NFT"
+  # Disconnect VirtualBox first when turning off, and restore it last when
+  # turning on. Reconcile it even if the bridge policy was already in state.
+  [[ "$want" == off ]] && vbox_set_state off
+  if [[ "$now" == "$want" ]]; then
+    log "guest bridge passthrough is already $want"
+    [[ "$want" == on ]] && vbox_set_state on
     return 0
   fi
 
@@ -86,10 +192,16 @@ set_state() {
     index($0, e) { inside = 0; print; next }
     inside {
       if (want == "off") {
-        # Comment out the rules, preserving them verbatim so "on" can restore
-        # exactly what the tier rendered rather than a reconstruction.
-        if ($0 ~ /^[[:space:]]+(iifname|oifname)/) { print "        # TKOC_VM_OFF:" $0; next }
+        if ($0 ~ /^[[:space:]]+(iifname|oifname).*accept[[:space:]]*$/) {
+          print "# TKOC_VM_OFF:" $0; next
+        }
+        if ($0 ~ /^[[:space:]]*# TKOC_VM_ON:/) {
+          sub(/^[[:space:]]*# TKOC_VM_ON:/, "", $0); print; next
+        }
       } else {
+        if ($0 ~ /^[[:space:]]+(iifname|oifname).*drop[[:space:]]*$/) {
+          print "# TKOC_VM_ON:" $0; next
+        }
         if ($0 ~ /^[[:space:]]*# TKOC_VM_OFF:/) {
           sub(/^[[:space:]]*# TKOC_VM_OFF:/, "", $0); print; next
         }
@@ -107,6 +219,7 @@ set_state() {
     run_root nft --file "$LIVE_NFT"
     log "reloaded the firewall"
   fi
+  [[ "$want" == on ]] && vbox_set_state on
   log "guest network passthrough is now $want"
 }
 
@@ -127,6 +240,10 @@ main() {
     status|show)
       require_policy quiet
       printf '  guest network passthrough: %s\n' "$(current_state)"
+      if ! grep -Fq '# TKOC_VM_GUARD' <<<"$POLICY_BODY"; then
+        printf '  warning: installed policy lacks the established-flow guard; re-apply the firewall tier\n'
+      fi
+      vbox_status
       printf '  policy: %s\n' "$LIVE_NFT"
       ;;
     help|--help|-h) usage ;;

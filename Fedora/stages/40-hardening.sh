@@ -456,6 +456,11 @@ main() {
   handle_firewalld
   install_policy
   apply_policy
+  # A fresh tier starts with guest networking off. VirtualBox NAT bypasses the
+  # forward chain, so reconcile its virtual cables as part of that posture.
+  if ! tkoc_bool_enabled TKOC_DRY_RUN disabled; then
+    bash "$REPO_ROOT/tools/vm-net.sh" off
+  fi
 
   STAGE_COMPLETE=enabled
   if [[ "${OWNS_SNAPSHOT:-disabled}" == enabled ]]; then

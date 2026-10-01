@@ -228,14 +228,60 @@ vm_state() {
     || { sed 's/^/    /' "$TEST_AREA/vmnet.out" >&2; fail "$2"; }
 }
 
-vm_state on "guest passthrough should start on"
-bash "$PROJECT_ROOT/tools/vm-net.sh" off --yes >/dev/null
-vm_state off "vm net off did not take effect"
+vm_state off "guest passthrough should start off"
 bash "$PROJECT_ROOT/tools/vm-net.sh" on --yes >/dev/null
 vm_state on "vm net on did not restore the rules"
-refute_grep 'TKOC_VM_OFF' "$TKOC_TEST_ROOT/etc/nftables/tkoc.nft" \
-  "vm net on left commented-out rules behind"
+refute_grep '^\s+iifname "virbr\*" counter drop' "$TKOC_TEST_ROOT/etc/nftables/tkoc.nft" \
+  "vm net on left the bridge guard active"
+assert_grep '^\s+iifname "virbr\*" ct state new.*accept' "$TKOC_TEST_ROOT/etc/nftables/tkoc.nft" \
+  "vm net on did not permit new guest connections"
+bash "$PROJECT_ROOT/tools/vm-net.sh" off --yes >/dev/null
+vm_state off "vm net off did not take effect"
+assert_grep '^\s+iifname "virbr\*" counter drop' "$TKOC_TEST_ROOT/etc/nftables/tkoc.nft" \
+  "vm net off did not restore the early bridge drop"
+refute_grep '^\s+iifname "virbr\*" ct state new.*accept' "$TKOC_TEST_ROOT/etc/nftables/tkoc.nft" \
+  "vm net off left new guest connections accepted"
+awk '/iifname "virbr\*" counter drop/ { blocked = NR } /ct state established,related accept/ && blocked && NR > blocked { guarded = 1 } END { exit !guarded }' \
+  "$TKOC_TEST_ROOT/etc/nftables/tkoc.nft" || fail "vm net off must block guests before established connections"
+stage_tier strong
+vm_state off "re-applying a firewall tier should return guest passthrough to off"
 ok "vm net round-trips the guest passthrough block"
+
+# VirtualBox NAT uses host sockets, so a bridge firewall cannot disconnect it.
+# Exercise the CLI integration with a fake VM, including its saved prior state.
+mkdir -p "$TEST_AREA/fakebin"
+printf 'on\n' > "$TEST_AREA/vbox-cable"
+cat > "$TEST_AREA/fakebin/VBoxManage" <<'FAKE_VBOX'
+#!/usr/bin/env bash
+set -e
+case "$1" in
+  list) printf '"test" {11111111-1111-1111-1111-111111111111}\n' ;;
+  showvminfo)
+    printf 'VMState="poweroff"\nnic1="nat"\ncableconnected1="%s"\n' "$(cat "$FAKE_VBOX_CABLE")"
+    ;;
+  getextradata)
+    if [[ -f "$FAKE_VBOX_RESTORE" ]]; then printf 'Value: on\n'; else printf 'No value set!\n'; fi
+    ;;
+  setextradata)
+    if [[ "${4:-}" == on ]]; then printf 'on\n' > "$FAKE_VBOX_RESTORE"; else rm -f "$FAKE_VBOX_RESTORE"; fi
+    ;;
+  modifyvm) printf '%s\n' "$4" > "$FAKE_VBOX_CABLE" ;;
+  *) exit 1 ;;
+esac
+FAKE_VBOX
+chmod +x "$TEST_AREA/fakebin/VBoxManage"
+export FAKE_VBOX_CABLE="$TEST_AREA/vbox-cable"
+export FAKE_VBOX_RESTORE="$TEST_AREA/vbox-restore"
+export TKOC_TEST_VBOX=enabled
+export PATH="$TEST_AREA/fakebin:$PATH"
+bash "$PROJECT_ROOT/tools/vm-net.sh" off --yes >/dev/null
+[[ "$(cat "$FAKE_VBOX_CABLE")" == off && -f "$FAKE_VBOX_RESTORE" ]] \
+  || fail "vm net off did not disconnect and remember the VirtualBox adapter"
+bash "$PROJECT_ROOT/tools/vm-net.sh" on --yes >/dev/null
+[[ "$(cat "$FAKE_VBOX_CABLE")" == on && ! -f "$FAKE_VBOX_RESTORE" ]] \
+  || fail "vm net on did not restore the VirtualBox adapter"
+unset TKOC_TEST_VBOX FAKE_VBOX_CABLE FAKE_VBOX_RESTORE
+ok "vm net controls VirtualBox NAT adapters"
 
 # ── dotfiles into the throwaway HOME ────────────────────────────
 
