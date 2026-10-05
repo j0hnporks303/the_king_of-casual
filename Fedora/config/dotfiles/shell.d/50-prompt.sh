@@ -1,4 +1,19 @@
 # tkoc: git-aware, timed prompt driven by the selected prompt theme.
+# This file is also sourced by Zsh, where Liquid Prompt already owns the
+# precmd/preexec hooks. Bash's DEBUG trap and PROMPT_COMMAND do not belong there.
+if [[ -n ${ZSH_VERSION:-} ]]; then
+    # Common xterm/Konsole Ctrl+Arrow sequences. Bind both editing keymaps so
+    # the shortcuts work regardless of whether the user chose emacs or vi mode.
+    for tkoc_keymap in emacs viins; do
+        bindkey -M "$tkoc_keymap" '^[[1;5D' backward-word
+        bindkey -M "$tkoc_keymap" '^[[1;5C' forward-word
+        bindkey -M "$tkoc_keymap" '^[[5D' backward-word
+        bindkey -M "$tkoc_keymap" '^[[5C' forward-word
+    done
+    unset tkoc_keymap
+    return 0
+fi
+
 git_prompt_info() {
     [[ ! -d .git && ! $(git rev-parse --is-inside-work-tree 2>/dev/null) == "true" ]] && return
 
