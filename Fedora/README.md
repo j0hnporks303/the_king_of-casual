@@ -220,7 +220,9 @@ tkoc fs lock ~/Documents --apply
 sudo "$(command -v tkoc)" fs lockdown  # the root-owned counterpart
 tkoc pgp encrypt ~/notes -r you@example.com
 tkoc link ~/scripts/deploy.sh    # symlink onto PATH
+tkoc vm on|off|status            # all of it: guest network, VM services, KVM/VirtualBox modules
 tkoc vm net on|off|status        # guest bridges and VirtualBox adapters (off by default)
+tkoc vm host on|off|status       # VM services and kernel modules only
 tkoc wg show                     # WireGuard keypair and tunnel state
 tkoc clamav install --daily
 tkoc killall                     # close every open graphical app

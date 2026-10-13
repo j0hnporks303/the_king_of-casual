@@ -412,7 +412,63 @@ cmd_wg() {
   esac
 }
 
-cmd_vm()  { _tool vm-net "$@"; }
+# The closing line of `tkoc vm on|off`, in the same green/red as the change
+# report above it. A preview changed nothing, so it gets no verdict.
+_vm_result() {
+  local want="$1" rc="$2" arg
+  shift 2
+  for arg in "$@"; do [[ "$arg" == --dry-run || "$arg" == -n ]] && return 0; done
+  printf '\n'
+  if (( rc != 0 )); then
+    _warn_ "finished with errors; everything listed above did change"
+  elif [[ "$want" == on ]]; then
+    if tkoc_color; then printf '\033[1;32mVMs are ON\033[0m'; else printf 'VMs are ON'; fi
+    printf ': services, KVM and guest network are available\n'
+  else
+    if tkoc_color; then printf '\033[1;31mVMs are OFF\033[0m'; else printf 'VMs are OFF'; fi
+    printf ': no VM services, no VM kernel modules, no guest network\n'
+  fi
+}
+
+# `tkoc vm on|off` is the whole switch: guest networking (vm-net) and the host's
+# VM services and kernel modules (vm-host). `vm net` and `vm host` reach one
+# half each. Off cuts the network first and keeps going if a step fails, since
+# every step makes the machine safer. On restores the host first and stops at a
+# failure, so guests never get a network for a half-restored host.
+cmd_vm() {
+  local sub="${1:-status}" rc=0
+  (( $# > 0 )) && shift
+  case "$sub" in
+    net)  _tool vm-net net "$@" ;;
+    host) _tool vm-host "$@" ;;
+    off|disable)
+      _header "vm off"
+      _tool vm-net off "$@" || rc=$?
+      _tool vm-host off "$@" || rc=$?
+      _vm_result off "$rc" "$@"
+      return "$rc" ;;
+    on|enable)
+      _header "vm on"
+      _tool vm-host on "$@"
+      _tool vm-net on "$@"
+      _vm_result on 0 "$@" ;;
+    status|show)
+      _tool vm-net status "$@" || rc=$?
+      _tool vm-host status "$@" || rc=$?
+      return "$rc" ;;
+    help|--help|-h)
+      cat <<'HELP'
+Usage:
+  tkoc vm off       Cut guest networking, then mask VM services and block VM modules
+  tkoc vm on        Undo both
+  tkoc vm status    Both halves
+  tkoc vm net on|off|status    Guest networking only (firewall and VirtualBox cables)
+  tkoc vm host on|off|status   VM services and kernel modules only
+HELP
+      ;;
+    *) _die "Usage: tkoc vm [on|off|status] | tkoc vm net|host [on|off|status]" ;;
+  esac
+}
 cmd_fs() {
   case "${1:-help}" in
     lock|downlock) shift; _tool downlock "$@" ;;
@@ -455,7 +511,8 @@ Usage:
   tkoc clamav <subcommand>    ClamAV install/scan (see: tkoc clamav help)
   tkoc wg [show|up|down]      WireGuard keypair and tunnel state
   tkoc install wireguard      Install WireGuard and generate a keypair
-  tkoc vm net on|off|status   Guest network passthrough in the firewall
+  tkoc vm on|off|status       Everything VM: guest network, services, kernel modules
+  tkoc vm net|host on|off     One half of that (see: tkoc vm help)
   tkoc uav [PORT|show|detect] Port and reachability analysis
   tkoc fs lock [path]         Tighten file permissions you own
   sudo "$(command -v tkoc)" fs lockdown   Same, for root-owned files

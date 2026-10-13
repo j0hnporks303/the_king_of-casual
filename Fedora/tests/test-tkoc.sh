@@ -283,6 +283,22 @@ bash "$PROJECT_ROOT/tools/vm-net.sh" on --yes >/dev/null
 unset TKOC_TEST_VBOX FAKE_VBOX_CABLE FAKE_VBOX_RESTORE
 ok "vm net controls VirtualBox NAT adapters"
 
+# `tkoc vm on|off` drives both halves; `vm net` alone must leave the host alone.
+VM_BLOCK="$TKOC_TEST_ROOT/etc/modprobe.d/tkoc-vm-block.conf"
+bash "$TKOC" vm net off --yes >/dev/null
+[[ -e "$VM_BLOCK" ]] && fail "tkoc vm net off touched the host module block"
+bash "$TKOC" vm off --yes >/dev/null
+vm_state off "tkoc vm off did not cut guest networking"
+assert_grep '^install kvm /bin/false$' "$VM_BLOCK" "tkoc vm off did not block the KVM module"
+assert_grep '^install vboxdrv /bin/false$' "$VM_BLOCK" "tkoc vm off did not block the VirtualBox driver"
+bash "$TKOC" vm status > "$TEST_AREA/vm-status.out" 2>&1
+assert_grep 'passthrough: off' "$TEST_AREA/vm-status.out" "tkoc vm status left out the network half"
+assert_grep 'host VM services and modules: off' "$TEST_AREA/vm-status.out" "tkoc vm status left out the host half"
+bash "$TKOC" vm on --yes >/dev/null
+vm_state on "tkoc vm on did not restore guest networking"
+[[ -e "$VM_BLOCK" ]] && fail "tkoc vm on left the module block in place"
+ok "tkoc vm on|off switches guest networking and the host's VM modules together"
+
 # ── dotfiles into the throwaway HOME ────────────────────────────
 
 bash "$PROJECT_ROOT/tools/dotfiles.sh" --dry-run > "$TEST_AREA/dotfiles-dry.out"

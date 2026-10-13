@@ -66,7 +66,8 @@ uninstall:
 	@# NetworkManager dispatcher keeps setting DNS, with nothing left on the
 	@# machine able to turn either off. `make purge` is the way out.
 	@resid=""; \
-	for p in /etc/nftables/tkoc.nft /etc/NetworkManager/dispatcher.d/90-tkoc-network-watch; do \
+	for p in /etc/nftables/tkoc.nft /etc/NetworkManager/dispatcher.d/90-tkoc-network-watch \
+	         /etc/modprobe.d/tkoc-vm-block.conf; do \
 	  [ -e "$$p" ] && resid="$$resid $$p"; \
 	done; \
 	if [ -n "$$resid" ]; then \
@@ -78,7 +79,7 @@ uninstall:
 	  echo "with nothing able to stop them."; \
 	  echo; \
 	  echo "Remove tkoc properly first:"; \
-	  echo "    make purge          # undo the firewall, sysctl, and dispatcher"; \
+	  echo "    make purge          # undo the firewall, sysctl, dispatcher, and VM block"; \
 	  echo "Then, if you still want to:"; \
 	  echo "    make uninstall      # remove the symlink"; \
 	  echo; \
@@ -178,7 +179,8 @@ check:
 	@# obvious left to point at.
 	@resid=""; \
 	for p in /etc/nftables/tkoc.nft /etc/sysctl.d/60-tkoc-hardening.conf \
-	         /etc/NetworkManager/dispatcher.d/90-tkoc-network-watch; do \
+	         /etc/NetworkManager/dispatcher.d/90-tkoc-network-watch \
+	         /etc/modprobe.d/tkoc-vm-block.conf; do \
 	  [ -e "$$p" ] && resid="yes"; \
 	done; \
 	if [ -n "$$resid" ]; then \

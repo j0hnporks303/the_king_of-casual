@@ -11,7 +11,7 @@
 #
 #   1. persistence      the NetworkManager dispatcher, the ClamAV timer
 #   2. firewall         drop the tkoc table, remove the include, restore firewalld
-#   3. kernel           remove the sysctl policy and reload the defaults
+#   3. kernel           remove the sysctl policy and the VM module block
 #   4. services         nothing is re-enabled automatically -- see below
 #   5. command          the ~/.local/bin/tkoc symlink and the root-owned copies
 #
@@ -31,6 +31,7 @@ APPLY=disabled
 LIVE_NFT="${TKOC_TEST_ROOT:-}/etc/nftables/tkoc.nft"
 LIVE_SYSCTL="${TKOC_TEST_ROOT:-}/etc/sysctl.d/60-tkoc-hardening.conf"
 NFT_SYSCONFIG="${TKOC_TEST_ROOT:-}/etc/sysconfig/nftables.conf"
+VM_BLOCK="${TKOC_TEST_ROOT:-}/etc/modprobe.d/tkoc-vm-block.conf"
 BIN_LINK="${TKOC_BIN_DIR:-$HOME/.local/bin}/tkoc"
 ROOT_LIBEXEC="${TKOC_TEST_ROOT:-}/usr/local/libexec/tkoc"
 ROOT_SBIN="${TKOC_TEST_ROOT:-}/usr/local/sbin"
@@ -44,8 +45,9 @@ Usage:
   tkoc uninstall --apply    Actually undo it
 
 Removes the firewall policy and its boot include, the sysctl policy, the
-network-watch dispatcher, the ClamAV timer, the root-owned tool copies and the
-command symlink, and restores firewalld to the state a snapshot recorded.
+`tkoc vm off` module block and unit masks, the network-watch dispatcher, the
+ClamAV timer, the root-owned tool copies and the command symlink, and restores
+firewalld to the state a snapshot recorded.
 
 It does NOT re-enable services that privacy categories disabled. Turning sshd,
 Avahi, Bluetooth and Samba back on wholesale is a bigger change than removing
@@ -153,6 +155,14 @@ if [[ -f "$LIVE_SYSCTL" ]]; then
   fi
 else
   item "no sysctl policy installed"
+fi
+# `tkoc vm off` blocks VM kernel modules and masks the VM units. Left behind,
+# that keeps VMs impossible with nothing installed that can switch it back.
+if [[ -f "$VM_BLOCK" ]]; then
+  item "remove $VM_BLOCK and unmask the VM units (tkoc vm host on)"
+  do_it bash "$REPO_ROOT/tools/vm-host.sh" on
+else
+  item "no VM module block installed"
 fi
 
 step "4. Services"

@@ -97,14 +97,15 @@ vbox_field() {
 }
 
 vbox_set_state() {
-  local want="$1" uuid info vm_state slot nic cable key saved count=0
+  local want="$1" uuid info vm_name vm_state slot nic cable key saved count=0
   [[ -n "${TKOC_TEST_ROOT:-}" && "${TKOC_TEST_VBOX:-}" != enabled ]] && return 0
   command -v VBoxManage >/dev/null 2>&1 || return 0
   local vms; vms="$(vbox_vms)" || return 1
   while IFS= read -r uuid; do
     [[ -n "$uuid" ]] || continue
     info="$(vbox_manage showvminfo "$uuid" --machinereadable 2>/dev/null)" \
-      || { warn "VirtualBox VM $uuid is inaccessible; its cables were not changed"; continue; }
+      || { tkoc_skipped "VirtualBox VM $uuid" "inaccessible (files missing?); cables not changed"; continue; }
+    vm_name="$(vbox_field "$info" name)"
     vm_state="$(vbox_field "$info" VMState)"
     for slot in {1..8}; do
       nic="$(vbox_field "$info" "nic$slot")"
@@ -118,6 +119,7 @@ vbox_set_state() {
         else
           vbox_manage modifyvm "$uuid" "--cable-connected$slot" off
         fi
+        tkoc_change off "VirtualBox ${vm_name:-$uuid} nic $slot" "cable disconnected"
         ((count+=1))
       elif [[ "$want" == on ]]; then
         saved="$(vbox_manage getextradata "$uuid" "$key" 2>/dev/null)" || saved=""
@@ -128,6 +130,7 @@ vbox_set_state() {
             else
               vbox_manage modifyvm "$uuid" "--cable-connected$slot" on
             fi
+            tkoc_change on "VirtualBox ${vm_name:-$uuid} nic $slot" "cable reconnected"
             ((count+=1))
           fi
           vbox_manage setextradata "$uuid" "$key"
@@ -135,7 +138,7 @@ vbox_set_state() {
       fi
     done
   done <<<"$vms"
-  log "VirtualBox adapters changed: $count"
+  (( count > 0 )) || tkoc_same "VirtualBox adapters" "already $want"
 }
 
 vbox_status() {
@@ -174,11 +177,12 @@ set_state() {
     return 0
   fi
 
+  tkoc_section "Guest network"
   # Disconnect VirtualBox first when turning off, and restore it last when
   # turning on. Reconcile it even if the bridge policy was already in state.
   [[ "$want" == off ]] && vbox_set_state off
   if [[ "$now" == "$want" ]]; then
-    log "guest bridge passthrough is already $want"
+    tkoc_same "guest network passthrough" "already $want"
     [[ "$want" == on ]] && vbox_set_state on
     return 0
   fi
@@ -211,16 +215,21 @@ set_state() {
     { print }
   ' <<<"$POLICY_BODY" > "$tmp"
 
-  tkoc_validate_nft "$tmp" privileged
+  # A failed check still dies loudly on stderr; only the success line is
+  # dropped, since the change report below says the policy went in.
+  tkoc_validate_nft "$tmp" privileged >/dev/null
   run_root_path "$LIVE_NFT" install -m 0600 -- "$tmp" "$LIVE_NFT"
   rm -f -- "$tmp"
 
+  local how="guest traffic blocked"
+  [[ "$want" == on ]] && how="guests can reach the network"
   if command -v nft >/dev/null 2>&1 && [[ -z "${TKOC_TEST_ROOT:-}" ]]; then
     run_root nft --file "$LIVE_NFT"
-    log "reloaded the firewall"
+    how+=", firewall reloaded"
   fi
+  tkoc_change "$want" "guest network passthrough" "$how"
   [[ "$want" == on ]] && vbox_set_state on
-  log "guest network passthrough is now $want"
+  return 0
 }
 
 main() {
@@ -238,7 +247,10 @@ main() {
     on|enable)  require_policy prompting; set_state on ;;
     off|disable) require_policy prompting; set_state off ;;
     status|show)
-      require_policy quiet
+      # Prompt rather than stay quiet: /etc/nftables is root-only, so without a
+      # cached sudo the quiet reader cannot even tell that the policy exists,
+      # and reported an installed firewall as missing.
+      require_policy prompting
       printf '  guest network passthrough: %s\n' "$(current_state)"
       if ! grep -Fq '# TKOC_VM_GUARD' <<<"$POLICY_BODY"; then
         printf '  warning: installed policy lacks the established-flow guard; re-apply the firewall tier\n'

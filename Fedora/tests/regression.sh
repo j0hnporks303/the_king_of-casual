@@ -87,7 +87,7 @@ help_scripts=(
   tools/firewall-status.sh tools/firewall-test.sh
   tools/network-learn.sh tools/network-profile.sh tools/network-watch.sh
   tools/update.sh tools/uninstall.sh tools/uav.sh tools/linker.sh
-  tools/pgp.sh tools/downlock.sh tools/killall.sh tools/vm-net.sh
+  tools/pgp.sh tools/downlock.sh tools/killall.sh tools/vm-net.sh tools/vm-host.sh
   stages/00-base.sh stages/40-hardening.sh stages/45-wireguard.sh
   stages/50-antivirus.sh stages/55-privacy.sh stages/60-ricing.sh
 )

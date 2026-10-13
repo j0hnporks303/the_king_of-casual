@@ -22,6 +22,29 @@ log()  { printf '[tkoc] %s\n' "$*"; }
 warn() { printf '[tkoc][warn] %s\n' "$*" >&2; }
 die()  { printf '[tkoc][error] %s\n' "$*" >&2; exit 1; }
 
+# Change reports, for toggles that should show exactly what they did: green
+# for something switched on, red for off, grey for what was already so, yellow
+# for what was skipped. The +/-/=/! marks carry the same meaning without color,
+# which is what pipes, files and NO_COLOR get.
+tkoc_color() { [[ -t 1 && -z "${NO_COLOR:-}" ]]; }
+tkoc_section() {
+  if tkoc_color; then printf '\n\033[1m%s\033[0m\n' "$1"; else printf '\n%s\n' "$1"; fi
+}
+_tkoc_report_line() {
+  local color="$1" mark="$2" what="$3" how="$4"
+  if tkoc_color; then
+    printf '  \033[%sm%s %-32s %s\033[0m\n' "$color" "$mark" "$what" "$how"
+  else
+    printf '  %s %-32s %s\n' "$mark" "$what" "$how"
+  fi
+}
+# Usage: tkoc_change on|off <what> <how>
+tkoc_change() {
+  if [[ "$1" == on ]]; then _tkoc_report_line 32 + "$2" "$3"; else _tkoc_report_line 31 - "$2" "$3"; fi
+}
+tkoc_same()    { _tkoc_report_line 90 = "$1" "$2"; }
+tkoc_skipped() { _tkoc_report_line 33 '!' "$1" "$2"; }
+
 # ────────────────────────────────────────────────────────────────
 # TERMINAL INTERACTION
 # ────────────────────────────────────────────────────────────────

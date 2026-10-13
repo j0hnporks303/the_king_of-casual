@@ -83,7 +83,10 @@ devices. It does not assume a targeted, well-resourced physical attacker.
   off. VirtualBox NAT uses the host output path, so `tkoc vm` also disconnects
   registered VirtualBox adapters and restores their prior cable states on `on`.
   New VirtualBox VMs need an `off` reconciliation after creation. QEMU user-mode
-  networking (SLIRP or passt) is still outside this toggle. Guest-to-host
+  networking (SLIRP or passt) is still outside the network toggle. `tkoc vm off`
+  also masks the VM services and blocks the KVM, VirtualBox, VMware, vhost and
+  vfio-pci modules, so no hardware-accelerated guest can start at all; a guest
+  emulated purely in software (QEMU TCG) still can. Guest-to-host
   traffic also needs separate review. Tightening access selectively is a
   site-specific change.
 - **Container-published ports.** A container runtime inserts its own DNAT rules,
