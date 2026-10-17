@@ -1,0 +1,22 @@
+{
+  "_comment": [
+    "Which folders each Flatpak app may still reach once its whole-home or",
+    "whole-filesystem access is taken away. Read by the flatpak-portals privacy",
+    "category (strong and lockdown).",
+    "",
+    "This file is the template. Put your own copy at",
+    "~/.config/tkoc/flatpak-access.json -- outside the checkout, so it survives",
+    "`tkoc update` and is never committed -- and tkoc reads that one instead.",
+    "",
+    "An app listed here loses home and host access and is granted exactly the",
+    "folders given: ~/path, /path, or an xdg- name such as xdg-documents, with",
+    ":ro for read-only. An empty list grants nothing; file dialogs that go",
+    "through the portal still work. An app not listed is reported, never",
+    "changed, because tkoc cannot know which folder it needs.",
+    "",
+    "Changes take effect the next time the app starts. Undo one app with",
+    "`flatpak override --user --reset <app>`, or the whole run with",
+    "`tkoc state restore <id>`."
+  ],
+  "apps": {}
+}
