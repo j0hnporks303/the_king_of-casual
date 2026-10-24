@@ -18,3 +18,9 @@ make uninstall  # remove the symlink; the checkout is left alone
 make purge      # remove tkoc from this machine
 ```
 
+## Security focused command-line wrapper 
+With the tkoc commandline you can tailor your firewall, apply a very good nftables,
+and utilize tooling within that you may find helpful. 
+
+There's a long & boring story you can view on the macOS version of this:
+https://github.com/j0hnporks303/the_king_of_maCasual
