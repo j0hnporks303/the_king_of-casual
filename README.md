@@ -3,7 +3,7 @@ Clone it and run `make`. That links one command, `tkoc`, into `~/.local/bin`.
 Nothing is downloaded, nothing is chosen for you, and no shell config is edited.
 
 ```bash
-cd Fedora
+cd the_king_of-casual
 make
 ```
 
