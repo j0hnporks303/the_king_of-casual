@@ -577,6 +577,27 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(noop.exists(), out)
         self.no_system_calls()
 
+    def test_resolved_writes_the_resolvers_and_modes_it_was_given(self):
+        self.stub("systemctl", '''case "$*" in
+            list-unit-files*) printf 'systemd-resolved.service enabled enabled\\n' ;;
+            daemon-reload) exit 0 ;;
+            is-active*) exit 3 ;;
+            *) printf 'systemctl %s\\n' "$*" >> "$TEST_CALLS"; exit 97 ;;
+        esac''')
+        out = self.run_process(["bash", PROJECT / "stages/hardening/resolved.sh", "--yes"], env={
+            "ROUTER_DNS": "1.1.1.1#cloudflare-dns.com, 2606:4700:4700::1111#cloudflare-dns.com",
+            "TKOC_DNS_OVER_TLS": "yes", "TKOC_DNSSEC": "yes"})
+        conf = (self.root / "etc/systemd/resolved.conf.d/90-tkoc-lockdown.conf").read_text()
+        self.assertIn("DNS=1.1.1.1#cloudflare-dns.com 2606:4700:4700::1111#cloudflare-dns.com\n", conf)
+        self.assertIn("DNSOverTLS=yes\n", conf)
+        self.assertIn("DNSSEC=yes\n", conf)
+        self.assertIn("DNS-over-TLS is strict", out)
+        self.no_system_calls()
+        # A value resolved would misread must never reach its config file.
+        out = self.run_process(["bash", PROJECT / "stages/hardening/resolved.sh", "--yes"],
+                               expected=1, env={"TKOC_DNSSEC": "sure"})
+        self.assertIn("TKOC_DNSSEC must be", out)
+
     def test_category_previews_report_only_what_would_happen(self):
         # systemd-resolved is running, so discovery has a restart to preview.
         self.stub("systemctl", '''case "$*" in

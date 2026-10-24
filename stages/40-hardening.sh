@@ -4,7 +4,7 @@
 # Tiers (see config/firewall/tkoc.nft for the policy itself):
 #   vanilla   default-deny inbound/forward, permissive egress
 #   strong    + LAN discovery noise dropped, + IPv6 off, + sysctl hardening
-#   lockdown  + DNS pinned to one resolver, + DoT/DoQ dropped
+#   lockdown  + DNS pinned to the chosen resolvers, + other DoT/DoQ dropped
 #
 # Fedora ships firewalld enabled, and firewalld owns the nftables ruleset. The
 # two cannot both manage it, so this stage asks before displacing firewalld and
@@ -40,7 +40,7 @@ Usage:
 Tiers:
   vanilla   Default-deny inbound and forwarded traffic; permissive egress
   strong    + LAN discovery/multicast dropped, IPv6 off, sysctl hardening
-  lockdown  + DNS pinned to one resolver, DNS-over-TLS/QUIC dropped
+  lockdown  + DNS pinned to the chosen resolvers, other DNS-over-TLS/QUIC dropped
 
 Options:
 HELP
@@ -80,10 +80,15 @@ parse_args() {
       --ipv6-enabled)  TKOC_IPV6=enabled;  export TKOC_IPV6; shift ;;
       --ipv6-disabled) TKOC_IPV6=disabled; export TKOC_IPV6; shift ;;
       --dns)
-        [[ $# -ge 2 && "$2" != --* ]] || die "--dns requires a resolver IP"
-        tkoc_valid_ipv4 "$2" || die "--dns requires an IPv4 address, got: $2"
+        [[ $# -ge 2 && "$2" != --* ]] || die "--dns requires a resolver address or a comma-separated list"
+        tkoc_parse_dns_list "$2"
         TKOC_ENFORCE_DNS=enabled; ROUTER_DNS="$2"
         export TKOC_ENFORCE_DNS ROUTER_DNS; shift 2
+        ;;
+      --dns-over-tls)
+        [[ $# -ge 2 ]] || die "--dns-over-tls requires yes, opportunistic, or no"
+        tkoc_valid_dns_over_tls "$2" || die "--dns-over-tls takes yes, opportunistic, or no, got: $2"
+        TKOC_DNS_OVER_TLS="$2"; export TKOC_DNS_OVER_TLS; shift 2
         ;;
       --no-dns)
         TKOC_ENFORCE_DNS=disabled; export TKOC_ENFORCE_DNS; shift
@@ -138,11 +143,16 @@ resolve_policy() {
 
   POLICY_IPV6="$ipv6"
   POLICY_DNS="$enforce_dns"
+  POLICY_DOT="${TKOC_DNS_OVER_TLS:-no}"
+  tkoc_valid_dns_over_tls "$POLICY_DOT" \
+    || die "TKOC_DNS_OVER_TLS must be yes, opportunistic, or no, got: $POLICY_DOT"
 
   MARKERS=()
   [[ "$FW_LEVEL" == vanilla ]] || MARKERS+=( TKOC_LAN_NOISE )
   [[ "$POLICY_IPV6" == disabled ]] && MARKERS+=( TKOC_IPV6_OFF )
   [[ "$POLICY_DNS" == enabled ]] && MARKERS+=( TKOC_DNS_ENFORCE )
+  # Without a pin nothing on 853 is dropped, so there is nothing to carve out.
+  [[ "$POLICY_DNS" == enabled && "$POLICY_DOT" != no ]] && MARKERS+=( TKOC_DOT_ALLOW )
   tkoc_bool_enabled TKOC_ALLOW_SSH disabled && MARKERS+=( TKOC_SSH_ALLOW )
   tkoc_bool_enabled TKOC_ALLOW_WIREGUARD disabled && MARKERS+=( TKOC_WG_ALLOW )
 
@@ -161,6 +171,10 @@ resolve_policy() {
 # is only visible through resolvectl. Applications reach the stub over the
 # loopback accept rule regardless, so what belongs in ALLOWED_DNS4 is the
 # upstream resolver that resolved itself talks to.
+#
+# Detection only ever finds one IPv4 resolver. Lists, IPv6 and DoT server names
+# are for --dns to say; guessing them from whatever the network handed out is
+# how a machine ends up pinned to a resolver it never meant to trust.
 detect_dns4() {
   local address
   if command -v resolvectl >/dev/null 2>&1; then
@@ -187,21 +201,35 @@ detect_dns4() {
   return 1
 }
 
-select_dns4() {
-  local address="${ROUTER_DNS:-${TKOC_DNS4:-}}"
-  if [[ -n "$address" ]]; then
-    tkoc_valid_ipv4 "$address" || die "not a valid IPv4 resolver address: $address"
-    printf '%s\n' "$address"; return
+# Fills TKOC_DNS_SERVERS/ADDR4/ADDR6 (see tkoc_parse_dns_list). Call it
+# directly: in a command substitution the arrays would die with the subshell.
+select_dns() {
+  local list="${ROUTER_DNS:-${TKOC_DNS4:-}}"
+  if [[ -z "$list" ]]; then
+    if list="$(detect_dns4)"; then
+      log "detected IPv4 DNS resolver: $list"
+    else
+      tkoc_have_tty \
+        || die "could not detect a DNS resolver; pass --dns <ip>[,<ip>...] and run again"
+      list="$(tkoc_prompt 'DNS resolver(s), comma-separated: ')"
+    fi
   fi
-  if address="$(detect_dns4)"; then
-    log "detected IPv4 DNS resolver: $address" >&2
-    printf '%s\n' "$address"; return
+  tkoc_parse_dns_list "$list"
+
+  # Off-host IPv6 is dropped before the DNS rules are ever reached, so an IPv6
+  # resolver at an IPv6-off tier is configured but unreachable.
+  if [[ "$POLICY_IPV6" == disabled ]] && (( ${#TKOC_DNS_ADDR6[@]} > 0 )); then
+    (( ${#TKOC_DNS_ADDR4[@]} > 0 )) \
+      || die "every resolver given is IPv6, but IPv6 is off at this tier; add an IPv4 resolver or pass --ipv6 enabled"
+    warn "IPv6 is off at this tier, so ${TKOC_DNS_ADDR6[*]} cannot be reached; only the IPv4 resolvers will answer"
   fi
-  tkoc_have_tty \
-    || die "could not detect an IPv4 DNS resolver; pass --dns <ip> and run again"
-  address="$(tkoc_prompt 'IPv4 address of your DNS resolver: ')"
-  tkoc_valid_ipv4 "$address" || die "not a valid IPv4 address: $address"
-  printf '%s\n' "$address"
+}
+
+# "a, b, c": the element list of an nftables set.
+nft_elements() {
+  local joined
+  printf -v joined '%s, ' "$@"
+  printf '%s' "${joined%, }"
 }
 
 # ────────────────────────────────────────────────────────────────
@@ -285,7 +313,7 @@ _hardening_exit() {
 trap _hardening_exit EXIT
 
 render_policy() {
-  local dns4="" ssh_source=""
+  local ssh_source=""
 
   RENDERED_NFT="$(mktemp "${TMPDIR:-/tmp}/tkoc-nft.XXXXXX")"
   RENDERED_SYSCTL="$(mktemp "${TMPDIR:-/tmp}/tkoc-sysctl.XXXXXX")"
@@ -294,9 +322,14 @@ render_policy() {
   tkoc_render_markers "$SYSCTL_TEMPLATE" "$RENDERED_SYSCTL" ${MARKERS[@]+"${MARKERS[@]}"}
 
   if [[ "$POLICY_DNS" == enabled ]]; then
-    dns4="$(select_dns4)"
-    tkoc_render_define "$RENDERED_NFT" ALLOWED_DNS4 "$dns4"
-    POLICY_DNS_ADDRESS="$dns4"
+    # A family with no resolver keeps the template's loopback placeholder.
+    if (( ${#TKOC_DNS_ADDR4[@]} > 0 )); then
+      tkoc_render_define "$RENDERED_NFT" ALLOWED_DNS4 "$(nft_elements "${TKOC_DNS_ADDR4[@]}")"
+    fi
+    if (( ${#TKOC_DNS_ADDR6[@]} > 0 )); then
+      tkoc_render_define "$RENDERED_NFT" ALLOWED_DNS6 "$(nft_elements "${TKOC_DNS_ADDR6[@]}")"
+    fi
+    POLICY_DNS_ADDRESS="${TKOC_DNS_SERVERS[*]}"
   fi
 
   if tkoc_bool_enabled TKOC_ALLOW_SSH disabled; then
@@ -423,7 +456,8 @@ apply_policy() {
 
 summary() {
   local dns_note="" ssh_state ssh_note=""
-  [[ "$POLICY_DNS" == enabled ]] && dns_note=" (${POLICY_DNS_ADDRESS:-resolved at apply time})"
+  [[ "$POLICY_DNS" == enabled ]] \
+    && dns_note=" (${POLICY_DNS_ADDRESS:-resolved at apply time}; dns-over-tls $POLICY_DOT)"
   ssh_state="$(tkoc_bool_value TKOC_ALLOW_SSH disabled)"
   [[ "$ssh_state" == enabled ]] && ssh_note=" (${POLICY_SSH_SOURCE:-scoped at apply time})"
 
@@ -442,6 +476,11 @@ main() {
   need_supported_fedora
   tkoc_guard_ambient_ssh "$FW_LEVEL"
   resolve_policy
+  # Before the snapshot, so a resolver list this tier cannot use is refused
+  # without leaving a half-started run behind.
+  if [[ "$POLICY_DNS" == enabled ]]; then
+    select_dns
+  fi
 
   log "Firewall tier: $FW_LEVEL"
 

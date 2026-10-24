@@ -101,7 +101,7 @@ Usage:
 Tiers:
   vanilla   Default-deny inbound and forwarded; permissive egress
   strong    + LAN discovery dropped, IPv6 off, sysctl hardening
-  lockdown  + DNS pinned to one resolver, DNS-over-TLS/QUIC dropped
+  lockdown  + DNS pinned to the chosen resolvers, other DNS-over-TLS/QUIC dropped
 
 HELP
       tkoc_print_lockdown_note
@@ -118,7 +118,7 @@ HELP
       # flags stages/40-hardening.sh actually accepts.
       tkoc_print_firewall_options
       ;;
-    vanilla|basic|strong|lockdown|--vanilla|--basic|--strong|--lockdown|--ipv6|--ipv6-enabled|--ipv6-disabled|--dns|--no-dns|--dry-run|-n|--interface|--keep-firewalld|--wireguard|--wg|--no-wireguard|--ssh|--ssh=*|--ssh-source|--ssh-source=*|--no-ssh|--yes|-y|--allow-unsupported)
+    vanilla|basic|strong|lockdown|--vanilla|--basic|--strong|--lockdown|--ipv6|--ipv6-enabled|--ipv6-disabled|--dns|--dns-over-tls|--no-dns|--dry-run|-n|--interface|--keep-firewalld|--wireguard|--wg|--no-wireguard|--ssh|--ssh=*|--ssh-source|--ssh-source=*|--no-ssh|--yes|-y|--allow-unsupported)
       _header "Applying firewall hardening"
       _stage 40-hardening "$@" ;;
     *)
@@ -225,9 +225,19 @@ _parse_harden_args() {
       --ipv6-enabled)  export TKOC_IPV6=enabled; shift ;;
       --ipv6-disabled) export TKOC_IPV6=disabled; shift ;;
       --dns)
-        [[ $# -ge 2 && "$2" != --* ]] || _die "--dns requires a resolver IP"
+        [[ $# -ge 2 && "$2" != --* ]] || _die "--dns requires a resolver address or a comma-separated list"
+        # Checked here so a typo fails before either stage starts.
+        tkoc_parse_dns_list "$2"
         export TKOC_ENFORCE_DNS=enabled ROUTER_DNS="$2"; shift 2 ;;
       --no-dns) export TKOC_ENFORCE_DNS=disabled; shift ;;
+      --dns-over-tls)
+        [[ $# -ge 2 ]] || _die "--dns-over-tls requires yes, opportunistic, or no"
+        tkoc_valid_dns_over_tls "$2" || _die "--dns-over-tls takes yes, opportunistic, or no, got: $2"
+        export TKOC_DNS_OVER_TLS="$2"; shift 2 ;;
+      --dnssec)
+        [[ $# -ge 2 ]] || _die "--dnssec requires yes, allow-downgrade, or no"
+        tkoc_valid_dnssec "$2" || _die "--dnssec takes yes, allow-downgrade, or no, got: $2"
+        export TKOC_DNSSEC="$2"; shift 2 ;;
       --keep-firewalld) HARDEN_EXTRA[${#HARDEN_EXTRA[@]}]="--keep-firewalld"; shift ;;
       --wireguard|--wg) export TKOC_ALLOW_WIREGUARD=enabled; shift ;;
       --ssh|--ssh=*|--ssh-source|--ssh-source=*|--no-ssh)
@@ -248,7 +258,9 @@ Options:
   --firewall vanilla|strong|lockdown
   --privacy basic|strong|lockdown
   --ipv6 enabled|disabled
-  --dns <resolver-ip> | --no-dns
+  --dns <ip>[#name][,...] | --no-dns
+  --dns-over-tls yes|opportunistic|no
+  --dnssec yes|allow-downgrade|no
   --keep-firewalld
   --wireguard
   --ssh[=<source-ip-or-cidr>] | --ssh-source <cidr> | --no-ssh
@@ -257,6 +269,11 @@ Options:
 
 One recovery snapshot covers both stages, so a failure in either rolls the
 whole run back rather than leaving the machine half-hardened.
+
+--dns takes one resolver or a comma-separated list, IPv4 or IPv6. Each may end
+in #server.name, which systemd-resolved checks the certificate against when
+DNS-over-TLS is on. The firewall pin and systemd-resolved are both set from
+these, so they cannot disagree. IPv6 resolvers need --ipv6 enabled.
 HELP
         exit 0 ;;
       *)
@@ -540,7 +557,7 @@ Hardening profiles:
 Firewall tiers:
   vanilla   Default-deny inbound and forwarded; permissive egress
   strong    + LAN discovery dropped, IPv6 off, sysctl hardening
-  lockdown  + DNS pinned to one resolver, DNS-over-TLS/QUIC dropped
+  lockdown  + DNS pinned to the chosen resolvers, other DNS-over-TLS/QUIC dropped
 
 SSH carve-out:
   --ssh keeps sshd reachable and adds one scoped nftables accept for TCP/22,

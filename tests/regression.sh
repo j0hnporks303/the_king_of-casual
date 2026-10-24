@@ -185,6 +185,37 @@ grep -qE '^\s+ip saddr \$SSH_SOURCE tcp dport 22' "$ssh_tier" \
   || fail "the SSH marker did not render the carve-out"
 pass "inbound SSH is closed unless the carve-out marker is enabled"
 
+# DoT is dropped at lockdown unless it was asked for, and when it is, the
+# carve-out reaches the pinned resolvers only and comes before the 853 drop.
+grep -qE '^\s+ip6? daddr \$ALLOWED_DNS[46] tcp dport 853 accept' "$lockdown" \
+  && fail "lockdown opened DNS-over-TLS without --dns-over-tls"
+dot_tier="$(render_tier dot TKOC_LAN_NOISE TKOC_IPV6_OFF TKOC_DNS_ENFORCE TKOC_DOT_ALLOW)"
+grep -qE '^\s+ip daddr \$ALLOWED_DNS4 tcp dport 853 accept' "$dot_tier" \
+  || fail "the DoT marker did not open 853 to the pinned IPv4 resolvers"
+grep -qE '^\s+ip6 daddr \$ALLOWED_DNS6 tcp dport 853 accept' "$dot_tier" \
+  || fail "the DoT marker did not open 853 to the pinned IPv6 resolvers"
+dot_accept="$(grep -nE '^\s+ip daddr \$ALLOWED_DNS4 tcp dport 853 accept' "$dot_tier" | cut -d: -f1)"
+dot_drop="$(grep -nE '^\s+meta l4proto \{ tcp, udp \} th dport 853 counter' "$dot_tier" | cut -d: -f1)"
+(( dot_accept < dot_drop )) || fail "the DoT carve-out comes after the 853 drop and can never match"
+pass "DNS-over-TLS reaches only the pinned resolvers, and only when asked"
+
+# ── 6b. Resolver lists are validated before anything is rendered ─
+
+for good in 192.0.2.53 2001:db8::53 ::1 1:2:3:4:5:6:7:8 '1.1.1.1#cloudflare-dns.com' \
+    '2606:4700:4700::1111#one.one.one.one'; do
+  tkoc_valid_dns_server "$good" || fail "a valid resolver was refused: $good"
+done
+for bad in '' 1.1.1.1:53 '[::1]:53' 'fe80::1%eth0' 1::2::3 1:2:3:4:5:6:7:8:9 999.1.1.1 \
+    '1.1.1.1#' '1.1.1.1#-bad' '1.1.1.1#a b' $'1.1.1.1#a\nDNS=9.9.9.9'; do
+  tkoc_valid_dns_server "$bad" && fail "a malformed resolver was accepted: $(printf '%q' "$bad")"
+done
+tkoc_parse_dns_list '192.0.2.1#a.example, 192.0.2.1#a.example,2001:db8::1 192.0.2.2'
+[[ "${TKOC_DNS_SERVERS[*]}" == '192.0.2.1#a.example 2001:db8::1 192.0.2.2' ]] \
+  || fail "the resolver list did not split and de-duplicate: ${TKOC_DNS_SERVERS[*]}"
+[[ "${TKOC_DNS_ADDR4[*]}" == '192.0.2.1 192.0.2.2' && "${TKOC_DNS_ADDR6[*]}" == '2001:db8::1' ]] \
+  || fail "the resolver list did not separate by family"
+pass "resolver lists are validated, split by family, and de-duplicated"
+
 # ── 7. The sysctl template renders and validates ────────────────
 
 tkoc_render_markers "$ROOT/config/sysctl.d/60-tkoc-hardening.conf" "$TMP_ROOT/vanilla.conf"

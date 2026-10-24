@@ -111,6 +111,7 @@ nft_tier() {
 render_check "firewall template renders and validates (vanilla)" nft_tier
 render_check "firewall template renders and validates (strong)" nft_tier TKOC_LAN_NOISE TKOC_IPV6_OFF
 render_check "firewall template renders and validates (lockdown)" nft_tier TKOC_LAN_NOISE TKOC_IPV6_OFF TKOC_DNS_ENFORCE
+render_check "firewall template renders and validates (lockdown, DoT)" nft_tier TKOC_LAN_NOISE TKOC_IPV6_OFF TKOC_DNS_ENFORCE TKOC_DOT_ALLOW
 require "sysctl policy parses" tkoc_validate_sysctl "$REPO_ROOT/config/sysctl.d/60-tkoc-hardening.conf"
 require "theme configuration is valid" bash "$REPO_ROOT/stages/60-ricing.sh" validate
 require "ice manifest is valid" bash "$REPO_ROOT/tools/ice.sh" list

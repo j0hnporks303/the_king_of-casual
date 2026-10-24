@@ -57,8 +57,9 @@ Applied by `tkoc firewall <tier>` through `config/firewall/tkoc.nft`:
   outbound.
 - From strong: LAN discovery and multicast dropped in both directions, off-host
   IPv6 blocked.
-- At lockdown: DNS restricted to the resolver chosen at apply time, with
-  DNS-over-TLS and DNS-over-QUIC dropped outright.
+- At lockdown: DNS restricted to the resolvers chosen at apply time, with
+  DNS-over-QUIC dropped outright and DNS-over-TLS dropped unless opted in to
+  those same resolvers.
 - Loopback accepted at every tier without exception, because systemd-resolved's
   stub at 127.0.0.53 is what every application actually talks to.
 

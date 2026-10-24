@@ -347,6 +347,87 @@ tkoc_valid_ipv4() { [[ "$1" != */* ]] && tkoc_valid_ipv4_source "$1"; }
 tkoc_valid_interface() { [[ "$1" =~ ^[A-Za-z0-9_.@-]+$ ]]; }
 tkoc_valid_absolute_path() { [[ "$1" == /* && "$1" != *$'\n'* && "$1" != *$'\r'* ]]; }
 
+# IPv6 in the forms a resolver address is written in: eight groups, or fewer
+# with a single "::". Embedded-IPv4 and %zone forms are not accepted.
+tkoc_valid_ipv6() {
+  local address="$1" half group count=0
+  local -a halves groups
+  [[ "$address" =~ ^[0-9A-Fa-f:]+$ && "$address" == *:* ]] || return 1
+  if [[ "$address" == *::* ]]; then
+    halves=( "${address%%::*}" "${address#*::}" )
+    [[ "${halves[1]}" != *::* ]] || return 1
+  else
+    halves=( "$address" )
+  fi
+  for half in "${halves[@]}"; do
+    [[ -n "$half" ]] || continue
+    # read drops a trailing empty field, so a stray edge colon is caught here.
+    [[ "$half" != :* && "$half" != *: ]] || return 1
+    IFS=: read -r -a groups <<<"$half"
+    for group in "${groups[@]}"; do
+      [[ "$group" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+      count=$((count + 1))
+    done
+  done
+  if [[ "$address" == *::* ]]; then (( count <= 7 )); else (( count == 8 )); fi
+}
+
+# A resolver as systemd-resolved writes it: an IPv4 or IPv6 address, then an
+# optional "#server.name" that DNS-over-TLS checks the certificate against.
+# Ports and %interface suffixes are refused: the firewall pin matches the
+# address on the standard ports, so a resolver on any other port would be
+# configured in resolved and then dropped.
+tkoc_valid_dns_server() {
+  local address="${1%%#*}" name
+  if [[ "$1" == *#* ]]; then
+    name="${1#*#}"
+    (( ${#name} <= 253 )) || return 1
+    [[ "$name" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$ ]] \
+      || return 1
+  fi
+  tkoc_valid_ipv4 "$address" || tkoc_valid_ipv6 "$address"
+}
+
+tkoc_valid_dns_over_tls() { [[ "$1" == yes || "$1" == opportunistic || "$1" == no ]]; }
+tkoc_valid_dnssec() { [[ "$1" == yes || "$1" == allow-downgrade || "$1" == no ]]; }
+
+_tkoc_in_list() {
+  local needle="$1" item; shift
+  for item in "$@"; do [[ "$item" == "$needle" ]] && return 0; done
+  return 1
+}
+
+# Split a resolver list -- separated by commas, spaces, or both -- into what
+# each consumer needs, dropping repeats:
+#   TKOC_DNS_SERVERS  each entry as given, for resolved's DNS= line
+#   TKOC_DNS_ADDR4    the bare IPv4 addresses, for the firewall's ALLOWED_DNS4
+#   TKOC_DNS_ADDR6    the bare IPv6 addresses, for the firewall's ALLOWED_DNS6
+# Dies on the first malformed entry, naming it, so a typo cannot quietly pin
+# the machine to fewer resolvers than were asked for. Call it directly, not in
+# a command substitution, or the arrays vanish with the subshell.
+tkoc_parse_dns_list() {
+  local entry address
+  local -a entries=()
+  TKOC_DNS_SERVERS=(); TKOC_DNS_ADDR4=(); TKOC_DNS_ADDR6=()
+  IFS=$', \t\n' read -r -d '' -a entries <<<"$1" || true
+  for entry in ${entries[@]+"${entries[@]}"}; do
+    [[ -n "$entry" ]] || continue
+    tkoc_valid_dns_server "$entry" \
+      || die "not a valid DNS resolver: $entry (expected an IPv4 or IPv6 address, optionally followed by #server.name)"
+    _tkoc_in_list "$entry" ${TKOC_DNS_SERVERS[@]+"${TKOC_DNS_SERVERS[@]}"} && continue
+    TKOC_DNS_SERVERS+=( "$entry" )
+    address="${entry%%#*}"
+    if tkoc_valid_ipv4 "$address"; then
+      _tkoc_in_list "$address" ${TKOC_DNS_ADDR4[@]+"${TKOC_DNS_ADDR4[@]}"} \
+        || TKOC_DNS_ADDR4+=( "$address" )
+    else
+      _tkoc_in_list "$address" ${TKOC_DNS_ADDR6[@]+"${TKOC_DNS_ADDR6[@]}"} \
+        || TKOC_DNS_ADDR6+=( "$address" )
+    fi
+  done
+  (( ${#TKOC_DNS_SERVERS[@]} > 0 )) || die "no DNS resolver given"
+}
+
 # Reduce a git remote URL to a comparable host/owner/repo identity, so the same
 # repository reached over SSH and over HTTPS compares equal.
 #
@@ -446,10 +527,11 @@ tkoc_print_lockdown_note() {
   cat <<'HELP'
 Lockdown locks down remote access. sshd, Cockpit, VNC/RDP, file sharing
 (Samba/NFS/rpcbind), Avahi/mDNS discovery, cups-browsed and Bluetooth are all
-turned off, inbound is default-deny, and DNS is pinned to one resolver with
-DoT/DoQ dropped. That is the tier, not a set of defaults: --block-all and
---no-ssh do not apply here. The only way through is one explicit, scoped
-exception:  --ssh-source <ip-or-cidr>
+turned off, inbound is default-deny, and DNS is pinned to the resolvers you
+name with --dns: plain DNS and DoT to anywhere else, and DoQ everywhere, are
+dropped. That is the tier, not a set of defaults: --block-all and --no-ssh do
+not apply here. The only way through is one explicit, scoped exception:
+    --ssh-source <ip-or-cidr>
 HELP
 }
 
@@ -466,7 +548,10 @@ tkoc_print_firewall_options() {
   --ipv6 enabled|disabled           IPv6 posture, firewall and kernel together
   --ipv6-enabled, --ipv6-disabled   Shorthand for the above
   --interface <name>                Override the detected external interface
-  --dns <resolver-ip>               Pin DNS to ONLY this resolver (forced at lockdown)
+  --dns <ip>[#name][,...]           Pin DNS to ONLY these resolvers (forced at lockdown);
+                                    IPv4 or IPv6, #name is the DNS-over-TLS server name
+  --dns-over-tls yes|opportunistic|no
+                                    Allow DNS-over-TLS to the pinned resolvers (default no)
   --no-dns                          Do not pin DNS (ignored at lockdown)
   --keep-firewalld                  Do not disable/mask firewalld (see below)
   --wireguard                       Accept inbound WireGuard on UDP/51820

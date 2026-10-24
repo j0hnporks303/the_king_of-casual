@@ -150,6 +150,31 @@ assert_grep 'th dport 853' "$TKOC_TEST_ROOT/etc/nftables/tkoc.nft" \
   "lockdown must drop DNS-over-TLS/QUIC"
 ok "lockdown pins the resolver and drops encrypted DNS"
 
+stage_tier lockdown --ipv6 enabled --dns '192.0.2.53#dns.example, 192.0.2.54,2001:db8::53#dns.example' \
+  --dns-over-tls yes
+assert_grep '^define ALLOWED_DNS4 = \{ 192\.0\.2\.53, 192\.0\.2\.54 \}' "$TKOC_TEST_ROOT/etc/nftables/tkoc.nft" \
+  "the IPv4 resolvers were not rendered into the policy"
+assert_grep '^define ALLOWED_DNS6 = \{ 2001:db8::53 \}' "$TKOC_TEST_ROOT/etc/nftables/tkoc.nft" \
+  "the IPv6 resolver was not rendered into the policy"
+assert_grep '^\s+ip6 daddr \$ALLOWED_DNS6 udp dport 53 accept' "$TKOC_TEST_ROOT/etc/nftables/tkoc.nft" \
+  "lockdown must pin IPv6 DNS"
+assert_grep '^\s+ip daddr \$ALLOWED_DNS4 tcp dport 853 accept' "$TKOC_TEST_ROOT/etc/nftables/tkoc.nft" \
+  "--dns-over-tls must open 853 to the pinned resolvers"
+ok "lockdown pins a dual-stack resolver list, with DNS-over-TLS to it on request"
+
+# A resolver the firewall cannot pin must be refused before anything is staged.
+for bad_dns in 1.1.1.1:53 'not-an-ip' '1.1.1.1#'; do
+  if bash "$PROJECT_ROOT/stages/40-hardening.sh" lockdown --dns "$bad_dns" \
+      --yes --allow-unsupported >/dev/null 2>&1; then
+    fail "a malformed --dns was accepted: $bad_dns"
+  fi
+done
+if bash "$PROJECT_ROOT/stages/40-hardening.sh" lockdown --dns 2001:db8::53 \
+    --yes --allow-unsupported >/dev/null 2>&1; then
+  fail "IPv6-only resolvers were accepted with IPv6 off"
+fi
+ok "resolvers the firewall cannot reach or pin are refused"
+
 stage_tier strong --ssh-source 192.168.8.0/24
 assert_grep '^define SSH_SOURCE = \{ 192\.168\.8\.0/24 \}' "$TKOC_TEST_ROOT/etc/nftables/tkoc.nft" \
   "the SSH source was not rendered"

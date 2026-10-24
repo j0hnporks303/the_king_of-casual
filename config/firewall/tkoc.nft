@@ -20,7 +20,8 @@
 #
 #   TKOC_LAN_NOISE    strong, lockdown      drop LAN discovery/multicast chatter
 #   TKOC_IPV6_OFF     when --ipv6 disabled  drop all off-host IPv6
-#   TKOC_DNS_ENFORCE  lockdown, or --dns    pin DNS to ALLOWED_DNS4, drop DoT/DoQ
+#   TKOC_DNS_ENFORCE  lockdown, or --dns    pin DNS to ALLOWED_DNS4/6, drop DoT/DoQ
+#   TKOC_DOT_ALLOW    --dns-over-tls        DoT (TCP/853) to the pinned resolvers only
 #   TKOC_SSH_ALLOW    --ssh/--ssh-source    scoped inbound TCP/22
 #   TKOC_WG_ALLOW     wireguard stage       inbound WireGuard UDP
 #
@@ -36,10 +37,14 @@
 # fail when this table is absent, and replacement through `nft -f` is atomic.
 # It needs nftables >= 1.0.7 and Linux >= 6.3; Fedora 40+ satisfies both.
 
-# Resolvers permitted on UDP/TCP 53 when DNS enforcement is on. Local stub
-# resolvers on loopback are allowed independently by the loopback rules below,
-# so systemd-resolved at 127.0.0.53 keeps working either way.
+# Resolvers permitted on UDP/TCP 53 when DNS enforcement is on, one set per
+# address family, rendered from --dns. Local stub resolvers on loopback are
+# allowed independently by the loopback rules below, so systemd-resolved at
+# 127.0.0.53 keeps working either way. That is also why the loopback
+# placeholders are safe: a family given no resolver keeps its placeholder
+# (nft has no empty anonymous set), and it opens nothing loopback did not.
 define ALLOWED_DNS4 = { 127.0.0.1 }
+define ALLOWED_DNS6 = { ::1 }
 
 # Source scope for the optional inbound SSH carve-out. Only consulted when the
 # TKOC_SSH_ALLOW marker is enabled; rendered from --ssh-source.
@@ -225,11 +230,16 @@ table inet tkoc_host {
 # TKOC_LAN_NOISE:         ip daddr 255.255.255.255 udp dport != 67 counter name output_lan_noise_blocked drop
 # TKOC_LAN_NOISE:         udp dport { 137, 138, 1716, 1900, 27036, 5353, 5355 } counter name output_lan_noise_blocked drop
 
-        # DNS enforcement. Everything on 53 that is not the chosen resolver is
+        # DNS enforcement. Everything on 53 that is not a chosen resolver is
         # dropped, as is DNS-over-TLS (TCP/853) and DNS-over-QUIC (UDP/853).
+        # --dns-over-tls carves TCP/853 back out for the chosen resolvers only.
         # DoH cannot be separated from ordinary HTTPS here; see the threat model.
 # TKOC_DNS_ENFORCE:         ip daddr $ALLOWED_DNS4 udp dport 53 accept
 # TKOC_DNS_ENFORCE:         ip daddr $ALLOWED_DNS4 tcp dport 53 accept
+# TKOC_DNS_ENFORCE:         ip6 daddr $ALLOWED_DNS6 udp dport 53 accept
+# TKOC_DNS_ENFORCE:         ip6 daddr $ALLOWED_DNS6 tcp dport 53 accept
+# TKOC_DOT_ALLOW:         ip daddr $ALLOWED_DNS4 tcp dport 853 accept
+# TKOC_DOT_ALLOW:         ip6 daddr $ALLOWED_DNS6 tcp dport 853 accept
 # TKOC_DNS_ENFORCE:         udp dport 53 limit rate 2/second burst 5 packets log prefix "tkoc DNS block: " flags all
 # TKOC_DNS_ENFORCE:         udp dport 53 counter name output_dns_blocked drop
 # TKOC_DNS_ENFORCE:         tcp dport 53 limit rate 2/second burst 5 packets log prefix "tkoc DNS block: " flags all

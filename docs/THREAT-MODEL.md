@@ -21,10 +21,12 @@ devices. It does not assume a targeted, well-resourced physical attacker.
   in both directions, so the host neither announces itself nor answers casual
   LAN probing. Avahi and cups-browsed are disabled at the userspace level too.
 - **DNS exfiltration and unexpected resolvers.** At the lockdown tier, outbound
-  UDP/TCP 53 is permitted only to the resolver chosen at apply time; everything
-  else on 53, plus DNS-over-TLS and DNS-over-QUIC on 853, is dropped and
-  counted. The `resolved` privacy category makes systemd-resolved agree with
-  that, so the two cannot disagree into a machine that resolves nothing.
+  UDP/TCP 53 is permitted only to the resolvers chosen at apply time (IPv4,
+  IPv6, or both); everything else on 53, plus DNS-over-QUIC on 853, is dropped
+  and counted. DNS-over-TLS on 853 is dropped too, unless `--dns-over-tls`
+  opened it, and then only to those same resolvers. The `resolved` privacy
+  category makes systemd-resolved agree with that, so the two cannot disagree
+  into a machine that resolves nothing.
 - **IPv6 attack surface.** From the strong tier up, IPv6 is disabled off
   loopback both in the firewall and at the kernel level, so the guarantee
   survives a firewall reload or failure rather than depending on nftables alone.

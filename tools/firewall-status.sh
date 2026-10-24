@@ -46,10 +46,21 @@ if [[ "$_have" == yes ]]; then
   ssh=$(grep -cE '^\s+ip saddr \$SSH_SOURCE' <<<"$_policy" || true)
   line "LAN discovery blocked" "$([ "${lan:-0}" -gt 0 ] && echo yes || echo no)"
   line "off-host IPv6 blocked" "$([ "${ipv6:-0}" -gt 0 ] && echo yes || echo no)"
-  line "DNS pinned to a resolver" "$([ "${dns:-0}" -gt 0 ] && echo yes || echo no)"
+  line "DNS pinned to resolvers" "$([ "${dns:-0}" -gt 0 ] && echo yes || echo no)"
   line "inbound SSH carve-out" "$([ "${ssh:-0}" -gt 0 ] && echo yes || echo no)"
   if [ "${dns:-0}" -gt 0 ]; then
-    line "allowed resolver" "$(awk -F'[{}]' '/^define ALLOWED_DNS4/ { gsub(/ /, "", $2); print $2; exit }' <<<"$_policy")"
+    # Both families, minus the loopback placeholder a family with no resolver
+    # keeps. Loopback is always reachable, so hiding it loses nothing.
+    line "allowed resolvers" "$(awk -F'[{}]' '/^define ALLOWED_DNS[46] / {
+        n = split($2, a, ",")
+        for (i = 1; i <= n; i++) {
+          gsub(/ /, "", a[i])
+          if (a[i] != "127.0.0.1" && a[i] != "::1") out = out (out == "" ? "" : " ") a[i]
+        }
+      }
+      END { print (out == "" ? "loopback only" : out) }' <<<"$_policy")"
+    dot=$(grep -cE '^\s+ip6? daddr \$ALLOWED_DNS[46] tcp dport 853 accept' <<<"$_policy" || true)
+    line "DNS-over-TLS to them" "$([ "${dot:-0}" -gt 0 ] && echo allowed || echo dropped)"
   fi
   if [ "${ssh:-0}" -gt 0 ]; then
     line "ssh source" "$(awk -F'[{}]' '/^define SSH_SOURCE/ { gsub(/ /, "", $2); print $2; exit }' <<<"$_policy")"
